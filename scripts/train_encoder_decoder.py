@@ -9,7 +9,8 @@ from transformers import GPT2TokenizerFast
 from tqdm import tqdm
 
 def load_dataset_pt(pt_file):
-    return torch.load(pt_file)
+    # 使用 weights_only=False 加载数据（数据来源可信）
+    return torch.load(pt_file, weights_only=False)
 
 def validate_dataset(data, max_len, dataset_name="dataset"):
     """
@@ -82,11 +83,11 @@ def train_encoder_decoder(
     data_dir="data/iwslt2017",
     tokenizer_dir="tokenization/gpt2",
     d_model=256,
-    num_layers=6,
-    num_heads=6,
+    num_layers=4,
+    num_heads=8,
     d_ff=1024,
     max_len=256,
-    batch_size=64,
+    batch_size=32,
     epochs=100,
     lr=3e-4,
     warmup_ratio=0.1,
