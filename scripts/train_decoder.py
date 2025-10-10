@@ -83,7 +83,7 @@ def train_decoder_only(
     num_heads=8,
     d_ff=1024,
     max_len=96,
-    batch_size=96,
+    batch_size=64,
     epochs=100,
     lr=3e-4,
     warmup_ratio=0.1,
