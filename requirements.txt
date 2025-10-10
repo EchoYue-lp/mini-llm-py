@@ -1,0 +1,17 @@
+# PyTorch 及相关库 (云平台已预装 PyTorch 2.5.1.1 + CUDA 12.4.1)
+# torch>=2.0.0  # 由云平台镜像提供
+
+# Transformers 库 (用于 tokenizer)
+transformers>=4.30.0
+
+# 进度条
+tqdm>=4.65.0
+
+# 评估指标
+sacrebleu>=2.3.0
+
+# 可选：数据处理
+datasets>=2.10.0
+
+# 可选：可视化
+matplotlib>=3.7.0

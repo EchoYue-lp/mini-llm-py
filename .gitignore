@@ -1,0 +1,77 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# PyTorch模型和检查点文件
+*.pt
+*.pth
+*.ckpt
+
+# 但保留示例文件（如果有）
+!example*.pt
+
+# 预处理后的数据文件
+*_ids.pt
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# 环境
+venv/
+ENV/
+env/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 日志文件
+*.log
+logs/
+runs/
+
+# 大型数据文件
+data/**/*.pt
+data/**/*_ids.pt
+data/iwslt2017/train.*.txt
+data/iwslt2017/validation.*.txt
+data/iwslt2017/test.*.txt
+
+# 保留小型数据集（wikitext2原始文本）
+!data/wikitext2/*.txt
+
+# Tokenizer缓存
+# tokenization/gpt2/
+# 注释掉以便提交tokenizer
+
+# 临时文件
+*.tmp
+temp/
+tmp/
