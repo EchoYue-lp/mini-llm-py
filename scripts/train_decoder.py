@@ -11,22 +11,79 @@ from tqdm import tqdm
 def load_dataset_pt(pt_file):
     return torch.load(pt_file)
 
-def collate_fn(batch):
-    # batch: List[List[int]]
-    batch = [torch.tensor(x, dtype=torch.long) for x in batch]
-    batch = torch.stack(batch)
-    return batch[:, :-1], batch[:, 1:]  # input, target
+def validate_dataset(data, max_len, dataset_name="dataset"):
+    """
+    验证数据集中的序列长度，报告统计信息
+
+    Args:
+        data: List[List[int]] - 数据集
+        max_len: int - 最大允许长度
+        dataset_name: str - 数据集名称（用于日志）
+    """
+    if not data:
+        print(f"警告: {dataset_name} 为空")
+        return
+
+    lengths = [len(seq) for seq in data]
+    min_len = min(lengths)
+    max_seq_len = max(lengths)
+    avg_len = sum(lengths) / len(lengths)
+
+    # 统计超长序列
+    over_limit = sum(1 for l in lengths if l > max_len)
+
+    print(f"\n{dataset_name} 统计:")
+    print(f"  样本数: {len(data)}")
+    print(f"  长度范围: [{min_len}, {max_seq_len}]")
+    print(f"  平均长度: {avg_len:.1f}")
+
+    if over_limit > 0:
+        print(f"  ⚠️  超过 max_len={max_len} 的序列: {over_limit}/{len(data)} ({over_limit/len(data)*100:.1f}%)")
+        print(f"  → 这些序列将被自动截断")
+    else:
+        print(f"  ✓ 所有序列都在 max_len={max_len} 范围内")
+
+def collate_fn(batch, pad_token_id=0, max_seq_len=1024):
+    """
+    动态 padding collate function
+    将不同长度的序列 pad 到 batch 内最大长度
+
+    Args:
+        batch: List[List[int]] - 列表，每个元素是一个 token id 序列
+        pad_token_id: padding token 的 id
+        max_seq_len: 最大序列长度，超过此长度的序列会被截断（防御性编程）
+
+    Returns:
+        input_ids: (batch, max_len-1) - 输入序列（去掉最后一个 token）
+        target_ids: (batch, max_len-1) - 目标序列（去掉第一个 token）
+    """
+    # 截断过长的序列（业界标准做法：防御性编程）
+    batch = [x[:max_seq_len] if len(x) > max_seq_len else x for x in batch]
+
+    # 找到 batch 内最大长度
+    max_len = max(len(x) for x in batch)
+
+    # 创建 padding 后的 tensor
+    batch_tensor = torch.full((len(batch), max_len), pad_token_id, dtype=torch.long)
+
+    # 填充每个序列
+    for i, seq in enumerate(batch):
+        seq_len = len(seq)
+        batch_tensor[i, :seq_len] = torch.tensor(seq, dtype=torch.long)
+
+    # input: 去掉最后一个 token，target: 去掉第一个 token
+    return batch_tensor[:, :-1], batch_tensor[:, 1:]
 
 def train_decoder_only(
     data_dir="data/wikitext2",
     tokenizer_dir="tokenization/gpt2",
     d_model=256,
-    num_layers=4,
-    num_heads=4,
+    num_layers=12,
+    num_heads=6,
     d_ff=1024,
-    max_len=128,
-    batch_size=32,
-    epochs=3,
+    max_len=256,
+    batch_size=64,
+    epochs=100,
     lr=3e-4,
     warmup_ratio=0.1,
     use_scheduler=True,
@@ -37,14 +94,35 @@ def train_decoder_only(
     device = device or ("mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
     tokenizer = GPT2TokenizerFast.from_pretrained(tokenizer_dir)
     vocab_size = tokenizer.vocab_size
+    pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+
     train_data = load_dataset_pt(os.path.join(data_dir, "train_ids.pt"))
     val_data = load_dataset_pt(os.path.join(data_dir, "validation_ids.pt"))
-    train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
-    val_loader = DataLoader(val_data, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
+
+    # 数据验证（业界最佳实践：训练前检查数据）
+    print("\n" + "="*60)
+    print("数据集验证")
+    print("="*60)
+    validate_dataset(train_data, max_len, "训练集")
+    validate_dataset(val_data, max_len, "验证集")
+    print("="*60)
+
+    # 使用 lambda 传递 pad_token_id 和 max_len 参数
+    train_loader = DataLoader(
+        train_data,
+        batch_size=batch_size,
+        shuffle=True,
+        collate_fn=lambda batch: collate_fn(batch, pad_token_id, max_len)
+    )
+    val_loader = DataLoader(
+        val_data,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=lambda batch: collate_fn(batch, pad_token_id, max_len)
+    )
     model = DecoderOnlyModel(vocab_size, d_model, num_layers, num_heads, d_ff, max_len).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     # 添加 ignore_index 以忽略 padding token 的损失
-    pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
     criterion = nn.CrossEntropyLoss(ignore_index=pad_token_id)
 
     # 学习率调度器

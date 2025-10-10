@@ -2,49 +2,6 @@
 
 **目标环境**: PyTorch 2.5.1.1 + CUDA 12.4.1 + Python 3.11
 
-## ✅ 已完成的关键修复
-
-### 1. 严重问题修复（5个）
-- ✅ **位置编码奇数维度问题** - `models/layers.py:96`
-  - 采用PyTorch官方标准实现
-  - 支持任意d_model（奇数/偶数）
-
-- ✅ **Embedding缩放** - `models/transformer_models.py:28-34`
-  - Decoder-Only模型添加`sqrt(d_model)`缩放
-  - Encoder-Decoder模型添加`sqrt(d_model)`缩放
-  - 提升训练稳定性
-
-- ✅ **Top-P采样边界条件** - `utils/generation_utils.py:151-162`
-  - 使用索引而非mask，逻辑更清晰
-  - 保证至少保留1个token
-  - 添加重新归一化步骤
-
-- ✅ **Beam Search序列处理** - `utils/generation_utils.py:60-66`
-  - 明确区分已完成和未完成序列
-  - 正确处理达到max_len但未生成EOS的情况
-
-- ✅ **训练异常处理** - `scripts/train_decoder.py:81-129`
-  - KeyboardInterrupt处理（Ctrl+C优雅退出）
-  - Exception处理（保存错误状态）
-  - 同时修复了train_encoder_decoder.py
-
-### 2. 设备自动检测
-所有脚本已实现智能设备检测：
-```python
-device = "mps" if torch.backends.mps.is_available() else \
-         "cuda" if torch.cuda.is_available() else "cpu"
-```
-
-云平台上会自动使用CUDA（优先级最高）
-
-### 3. 测试验证
-运行`python test/test_fixes.py`全部通过：
-- ✅ 位置编码测试（偶数、奇数、小奇数维度）
-- ✅ Embedding缩放测试
-- ✅ Top-P采样逻辑测试
-- ✅ 模型前向传播测试
-- ✅ 设备兼容性测试
-
 ## 🚀 云平台部署步骤
 
 ### 第1步：上传代码

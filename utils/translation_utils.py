@@ -32,10 +32,12 @@ def beam_search_translate(model, src_ids, tokenizer, beam_width=5, max_len=50, d
 
     # 编码源序列 (只需要编码一次)
     with torch.no_grad():
-        src_mask = create_padding_mask(src)
+        pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+        src_mask = create_padding_mask(src, pad_token_id=pad_token_id)
 
         # 手动运行 encoder
-        src_emb = model.src_embed(src)
+        # 重要：应用 embedding scaling 以匹配训练时的行为
+        src_emb = model.src_embed(src) * model.embed_scale
         src_emb = model.src_pos_enc(src_emb)
         memory = src_emb
         for layer in model.encoder_layers:
@@ -64,11 +66,12 @@ def beam_search_translate(model, src_ids, tokenizer, beam_width=5, max_len=50, d
             # 注意：生成时 tgt 序列逐步增长，没有 padding，所以只需要因果 mask
             tgt_mask = create_causal_mask(tgt.size(1), device=device)
             # cross_mask 处理源序列的 padding
-            cross_mask = create_padding_mask(src)
+            cross_mask = create_padding_mask(src, pad_token_id=pad_token_id)
 
             with torch.no_grad():
                 # 手动运行 decoder
-                tgt_emb = model.tgt_embed(tgt)
+                # 重要：应用 embedding scaling 以匹配训练时的行为
+                tgt_emb = model.tgt_embed(tgt) * model.embed_scale
                 tgt_emb = model.tgt_pos_enc(tgt_emb)
 
                 for layer in model.decoder_layers:
@@ -151,17 +154,18 @@ def greedy_translate(model, src_ids, tokenizer, max_len=50, device="cpu"):
 
     # GPT2 tokenizer 没有 BOS，使用 EOS 作为 BOS
     bos_id = tokenizer.bos_token_id if tokenizer.bos_token_id is not None else tokenizer.eos_token_id
+    pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
 
     src = torch.tensor(src_ids, dtype=torch.long).unsqueeze(0).to(device)  # (1, src_len)
     tgt = torch.tensor([bos_id], dtype=torch.long).unsqueeze(0).to(device)  # (1, 1)
 
     with torch.no_grad():
         for _ in range(max_len):
-            src_mask = create_padding_mask(src)
+            src_mask = create_padding_mask(src, pad_token_id=pad_token_id)
             # 注意：生成时 tgt 序列逐步增长，没有 padding，所以只需要因果 mask
             tgt_mask = create_causal_mask(tgt.size(1), device=device)
             # cross_mask 处理源序列的 padding
-            cross_mask = create_padding_mask(src)
+            cross_mask = create_padding_mask(src, pad_token_id=pad_token_id)
 
             logits, _ = model(src, tgt, src_mask=src_mask, tgt_mask=tgt_mask, cross_mask=cross_mask)
             next_token = logits[:, -1, :].argmax(-1, keepdim=True)
@@ -202,17 +206,18 @@ def top_k_translate(model, src_ids, tokenizer, k=10, max_len=50, device="cpu", t
 
     # GPT2 tokenizer 没有 BOS，使用 EOS 作为 BOS
     bos_id = tokenizer.bos_token_id if tokenizer.bos_token_id is not None else tokenizer.eos_token_id
+    pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
 
     src = torch.tensor(src_ids, dtype=torch.long).unsqueeze(0).to(device)
     tgt = torch.tensor([bos_id], dtype=torch.long).unsqueeze(0).to(device)
 
     with torch.no_grad():
         for _ in range(max_len):
-            src_mask = create_padding_mask(src)
+            src_mask = create_padding_mask(src, pad_token_id=pad_token_id)
             # 注意：生成时 tgt 序列逐步增长，没有 padding，所以只需要因果 mask
             tgt_mask = create_causal_mask(tgt.size(1), device=device)
             # cross_mask 处理源序列的 padding
-            cross_mask = create_padding_mask(src)
+            cross_mask = create_padding_mask(src, pad_token_id=pad_token_id)
 
             logits, _ = model(src, tgt, src_mask=src_mask, tgt_mask=tgt_mask, cross_mask=cross_mask)
             next_token_logits = logits[0, -1, :] / temperature
@@ -261,17 +266,18 @@ def top_p_translate(model, src_ids, tokenizer, p=0.9, max_len=50, device="cpu", 
 
     # GPT2 tokenizer 没有 BOS，使用 EOS 作为 BOS
     bos_id = tokenizer.bos_token_id if tokenizer.bos_token_id is not None else tokenizer.eos_token_id
+    pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
 
     src = torch.tensor(src_ids, dtype=torch.long).unsqueeze(0).to(device)
     tgt = torch.tensor([bos_id], dtype=torch.long).unsqueeze(0).to(device)
 
     with torch.no_grad():
         for _ in range(max_len):
-            src_mask = create_padding_mask(src)
+            src_mask = create_padding_mask(src, pad_token_id=pad_token_id)
             # 注意：生成时 tgt 序列逐步增长，没有 padding，所以只需要因果 mask
             tgt_mask = create_causal_mask(tgt.size(1), device=device)
             # cross_mask 处理源序列的 padding
-            cross_mask = create_padding_mask(src)
+            cross_mask = create_padding_mask(src, pad_token_id=pad_token_id)
 
             logits, _ = model(src, tgt, src_mask=src_mask, tgt_mask=tgt_mask, cross_mask=cross_mask)
             next_token_logits = logits[0, -1, :] / temperature

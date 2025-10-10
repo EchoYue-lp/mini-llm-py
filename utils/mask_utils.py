@@ -60,6 +60,22 @@ def combine_masks(causal_mask, padding_mask):
     return causal_mask & padding_mask_expanded
 
 def collate_fn_lm(batch, pad_token_id=0):
+    """
+    语言模型的 collate function，支持动态 padding
+
+    Args:
+        batch: List[List[int]] - 序列列表
+        pad_token_id: padding token 的 id
+
+    Returns:
+        input_ids: (batch, max_len-1) - 输入序列（去掉最后一个 token）
+        target_ids: (batch, max_len-1) - 目标序列（去掉第一个 token）
+
+    注意:
+        - 这个函数将不同长度的序列 pad 到 batch 内最大长度
+        - 使用时应配合 CrossEntropyLoss(ignore_index=pad_token_id)
+        - 训练时应使用 combine_masks(causal_mask, padding_mask)
+    """
     # batch: List[List[int]]
     max_len = max(len(x) for x in batch)
     batch_tensor = torch.full((len(batch), max_len), pad_token_id, dtype=torch.long)
@@ -69,6 +85,23 @@ def collate_fn_lm(batch, pad_token_id=0):
     return batch_tensor[:, :-1], batch_tensor[:, 1:]
 
 def collate_fn_mt(src_batch, tgt_batch, pad_token_id=0):
+    """
+    机器翻译的 collate function，支持动态 padding
+
+    Args:
+        src_batch: List[List[int]] - 源语言序列列表
+        tgt_batch: List[List[int]] - 目标语言序列列表
+        pad_token_id: padding token 的 id
+
+    Returns:
+        src_tensor: (batch, src_max_len) - padding 后的源序列
+        tgt_tensor: (batch, tgt_max_len) - padding 后的目标序列
+
+    注意:
+        - 源序列和目标序列分别 pad 到各自 batch 内的最大长度
+        - 使用时应配合 CrossEntropyLoss(ignore_index=pad_token_id)
+        - 训练时需要创建对应的 padding mask
+    """
     # src_batch, tgt_batch: List[List[int]]
     src_max = max(len(x) for x in src_batch)
     tgt_max = max(len(x) for x in tgt_batch)
