@@ -4,7 +4,7 @@ from transformers import GPT2TokenizerFast
 from tqdm import tqdm
 import torch
 
-def preprocess_text_file(text_file, tokenizer, out_file, seq_len=256, min_length=10):
+def preprocess_text_file(text_file, tokenizer, out_file, seq_len=96, min_length=10):
     # 读取所有文本
     with open(text_file, 'r', encoding='utf-8') as f:
         lines = [line.strip() for line in f if line.strip()]
@@ -22,7 +22,7 @@ def preprocess_text_file(text_file, tokenizer, out_file, seq_len=256, min_length
     torch.save(chunks, out_file)
     print(f"已保存 {len(chunks)} 个样本到 {out_file}")
 
-def preprocess_wikitext2(data_dir="data/wikitext2", tokenizer_dir="tokenization/gpt2", seq_len=256):
+def preprocess_wikitext2(data_dir="data/wikitext2", tokenizer_dir="tokenization/gpt2", seq_len=96):
     # 设置 model_max_length 避免 tokenizer 警告
     tokenizer = GPT2TokenizerFast.from_pretrained(tokenizer_dir, model_max_length=1e30)
     for split in ["train", "validation", "test"]:
@@ -30,7 +30,7 @@ def preprocess_wikitext2(data_dir="data/wikitext2", tokenizer_dir="tokenization/
         out_file = os.path.join(data_dir, f"{split}_ids.pt")
         preprocess_text_file(text_file, tokenizer, out_file, seq_len=seq_len)
 
-def preprocess_parallel_corpus(src_file, tgt_file, tokenizer, src_out, tgt_out, max_len=256):
+def preprocess_parallel_corpus(src_file, tgt_file, tokenizer, src_out, tgt_out, max_len=96):
     """
     预处理平行语料库，确保源和目标句对一一对应
 
@@ -74,7 +74,7 @@ def preprocess_parallel_corpus(src_file, tgt_file, tokenizer, src_out, tgt_out, 
     print(f"  源: {src_out}")
     print(f"  目标: {tgt_out}")
 
-def preprocess_opus100_en_zh(data_dir="data/iwslt2017", tokenizer_dir="tokenization/gpt2", seq_len=256):
+def preprocess_opus100_en_zh(data_dir="data/iwslt2017", tokenizer_dir="tokenization/gpt2", seq_len=96):
     # 设置 model_max_length 避免 tokenizer 警告
     tokenizer = GPT2TokenizerFast.from_pretrained(tokenizer_dir, model_max_length=1e30)
     for split in ["train", "validation", "test"]:
