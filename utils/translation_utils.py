@@ -56,8 +56,8 @@ def beam_search_translate(model, src_ids, tokenizer, beam_width=5, max_len=50, d
         candidates = []
 
         for seq, score in beams:
-            # 如果已经生成了 EOS，放入 completed
-            if seq[-1].item() == tokenizer.eos_token_id:
+            # 如果已经生成了 EOS（且不是第一步的 BOS），放入 completed
+            if len(seq) > 1 and seq[-1].item() == tokenizer.eos_token_id:
                 completed.append((seq, score))
                 continue
 
