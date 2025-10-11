@@ -7,6 +7,7 @@ from utils.mask_utils import create_causal_mask, create_padding_mask, combine_ma
 from utils.scheduler_utils import WarmupLRScheduler
 from transformers import GPT2TokenizerFast
 from tqdm import tqdm
+from torch.utils.tensorboard import SummaryWriter
 
 def load_dataset_pt(pt_file):
     # 使用 weights_only=False 加载数据（数据来源可信）
@@ -144,6 +145,14 @@ def train_decoder_only(
     best_val_loss = float('inf')
     best_model_path = "decoder_only_best.pt"
 
+    # TensorBoard 日志
+    log_dir = f'runs/decoder_{d_model}d_{num_layers}L_{num_heads}H_bs{batch_size}'
+    writer = SummaryWriter(log_dir=log_dir)
+    print(f"\n📊 TensorBoard 日志目录: {log_dir}")
+    print(f"💡 启动 TensorBoard 查看训练进度:")
+    print(f"   tensorboard --logdir=runs --port=6006")
+    print(f"   然后访问: http://localhost:6006\n")
+
     try:
         for epoch in range(1, epochs+1):
             model.train()
@@ -173,6 +182,10 @@ def train_decoder_only(
             avg_loss = total_loss / len(train_loader)
             current_lr = optimizer.param_groups[0]['lr']
             print(f"Epoch {epoch} Train Loss: {avg_loss:.4f}, LR: {current_lr:.2e}")
+
+            # 记录训练指标到 TensorBoard
+            writer.add_scalar('Loss/train', avg_loss, epoch)
+            writer.add_scalar('Learning_Rate', current_lr, epoch)
             # 验证
             model.eval()
             val_loss = 0
@@ -188,6 +201,13 @@ def train_decoder_only(
                     val_loss += loss.item()
             avg_val_loss = val_loss / len(val_loader)
             print(f"Epoch {epoch} Val Loss: {avg_val_loss:.4f}")
+
+            # 记录验证指标到 TensorBoard
+            writer.add_scalar('Loss/validation', avg_val_loss, epoch)
+            writer.add_scalars('Loss/train_vs_val', {
+                'train': avg_loss,
+                'validation': avg_val_loss
+            }, epoch)
 
             # 如果当前验证损失更低，保存最佳模型
             if avg_val_loss < best_val_loss:
@@ -215,6 +235,7 @@ def train_decoder_only(
                 print(f"  当前最佳 Val Loss: {best_val_loss:.4f}")
 
         print(f"\n训练完成！最佳验证损失: {best_val_loss:.4f}")
+        writer.close()
 
     except KeyboardInterrupt:
         print("\n\n训练被用户中断！")
@@ -240,6 +261,7 @@ def train_decoder_only(
         torch.save(checkpoint, interrupt_path)
         print(f"✓ 中断时的模型已保存: {interrupt_path}")
         print(f"当前最佳验证损失: {best_val_loss:.4f}")
+        writer.close()
 
     except Exception as e:
         print(f"\n\n训练过程中发生错误: {type(e).__name__}: {e}")
@@ -264,6 +286,7 @@ def train_decoder_only(
             checkpoint['scheduler_state_dict'] = scheduler.state_dict()
         torch.save(checkpoint, error_path)
         print(f"✓ 错误时的模型已保存: {error_path}")
+        writer.close()
         raise  # 重新抛出异常以便查看完整堆栈跟踪
 
 if __name__ == "__main__":
