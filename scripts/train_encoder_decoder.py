@@ -4,8 +4,9 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from utils.mask_utils import collate_fn_mt, create_padding_mask, create_causal_mask, combine_masks
 from utils.scheduler_utils import WarmupLRScheduler
+from utils.translation_utils import beam_search_translate
 from models.transformer_models import EncoderDecoderModel
-from transformers import GPT2TokenizerFast
+from utils.sentencepiece_tokenizer import SentencePieceTokenizer
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 
@@ -14,36 +15,18 @@ def load_dataset_pt(pt_file):
     return torch.load(pt_file, weights_only=False)
 
 def validate_dataset(data, max_len, dataset_name="dataset"):
-    """
-    验证数据集中的序列长度，报告统计信息
-
-    Args:
-        data: List[List[int]] - 数据集
-        max_len: int - 最大允许长度
-        dataset_name: str - 数据集名称（用于日志）
-    """
+    """验证数据集"""
     if not data:
-        print(f"警告: {dataset_name} 为空")
+        print(f"⚠ {dataset_name} 为空")
         return
 
     lengths = [len(seq) for seq in data]
-    min_len = min(lengths)
-    max_seq_len = max(lengths)
     avg_len = sum(lengths) / len(lengths)
-
-    # 统计超长序列
+    max_seq_len = max(lengths)
     over_limit = sum(1 for l in lengths if l > max_len)
 
-    print(f"\n{dataset_name} 统计:")
-    print(f"  样本数: {len(data)}")
-    print(f"  长度范围: [{min_len}, {max_seq_len}]")
-    print(f"  平均长度: {avg_len:.1f}")
-
-    if over_limit > 0:
-        print(f"  ⚠️  超过 max_len={max_len} 的序列: {over_limit}/{len(data)} ({over_limit/len(data)*100:.1f}%)")
-        print(f"  → 这些序列将被自动截断")
-    else:
-        print(f"  ✓ 所有序列都在 max_len={max_len} 范围内")
+    status = f"✓" if over_limit == 0 else f"⚠ {over_limit} 条超长"
+    print(f"{dataset_name}: {len(data):,} 条, 平均 {avg_len:.1f} tokens, 最大 {max_seq_len} [{status}]")
 
 def collate_fn_with_padding(src_batch, tgt_batch, pad_token_id=0, max_seq_len=1024):
     """
@@ -80,45 +63,73 @@ def collate_fn_with_padding(src_batch, tgt_batch, pad_token_id=0, max_seq_len=10
 
     return src_tensor, tgt_tensor
 
+def test_translation_demo(model, tokenizer, demo_sentences, device):
+    """在每个 epoch 结束时测试翻译效果"""
+    model.eval()
+    print("\n" + "─" * 60)
+    print("Demo 翻译测试:")
+    with torch.no_grad():
+        for en_text in demo_sentences:
+            try:
+                src_ids = tokenizer.encode(en_text, add_special_tokens=False)
+                zh_text = beam_search_translate(
+                    model, src_ids, tokenizer,
+                    beam_width=3, max_len=50, device=device
+                )
+                print(f"  EN: {en_text}")
+                print(f"  ZH: {zh_text}")
+            except Exception as e:
+                print(f"  EN: {en_text}")
+                print(f"  ZH: [翻译失败: {e}]")
+    print("─" * 60)
+
+
 def train_encoder_decoder(
     data_dir="data/iwslt2017",
-    tokenizer_dir="tokenization/gpt2",
+    tokenizer_path="tokenization/sentencepiece_enzh.model",
     d_model=128,
-    num_layers=2,
+    num_layers=6,
     num_heads=4,
     d_ff=512,
     max_len=96,
-    batch_size=128,
-    epochs=100,
-    lr=3e-4,
-    warmup_ratio=0.1,
+    batch_size=64,
+    gradient_accumulation_steps=6,
+    epochs=10,
+    lr=2e-4,
+    warmup_ratio=0.05,
     use_scheduler=True,
     scheduler_type='cosine',
     max_grad_norm=1.0,
-    device=None
+    use_amp=True,
+    gradient_checkpointing=False,
+    device=None,
+    demo_sentences=None
 ):
     device = device or ("mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
-    tokenizer = GPT2TokenizerFast.from_pretrained(tokenizer_dir)
+    tokenizer = SentencePieceTokenizer.from_pretrained(tokenizer_path)
     src_vocab_size = tgt_vocab_size = tokenizer.vocab_size
-    pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+    pad_token_id = tokenizer.pad_token_id
+
+    # 默认 demo 句子
+    if demo_sentences is None:
+        demo_sentences = [
+            "Hello, how are you?",
+            "I love machine learning."
+        ]
 
     for split in ["train", "validation"]:
-        src_data = load_dataset_pt(os.path.join(data_dir, f"{split}.en_ids.pt"))
-        tgt_data = load_dataset_pt(os.path.join(data_dir, f"{split}.zh_ids.pt"))
+        src_data = load_dataset_pt(os.path.join(data_dir, f"{split}.en_ids_sp.pt"))
+        tgt_data = load_dataset_pt(os.path.join(data_dir, f"{split}.zh_ids_sp.pt"))
         if split == "train":
             train_src, train_tgt = src_data, tgt_data
         else:
             val_src, val_tgt = src_data, tgt_data
 
-    # 数据验证（业界最佳实践：训练前检查数据）
-    print("\n" + "="*60)
-    print("数据集验证")
-    print("="*60)
-    validate_dataset(train_src, max_len, "训练集 (源语言)")
-    validate_dataset(train_tgt, max_len, "训练集 (目标语言)")
-    validate_dataset(val_src, max_len, "验证集 (源语言)")
-    validate_dataset(val_tgt, max_len, "验证集 (目标语言)")
-    print("="*60)
+    # 数据验证
+    validate_dataset(train_src, max_len, "训练集 (源)")
+    validate_dataset(train_tgt, max_len, "训练集 (目标)")
+    validate_dataset(val_src, max_len, "验证集 (源)")
+    validate_dataset(val_tgt, max_len, "验证集 (目标)")
 
     # 使用带 padding 的 collate_fn，传入 max_len 参数
     train_loader = DataLoader(
@@ -144,9 +155,27 @@ def train_encoder_decoder(
         )
     )
     model = EncoderDecoderModel(src_vocab_size, tgt_vocab_size, d_model, num_layers, num_heads, d_ff, max_len).to(device)
+
+    # Gradient checkpointing (节省显存但会降低训练速度)
+    if gradient_checkpointing:
+        if hasattr(model, 'gradient_checkpointing_enable'):
+            model.gradient_checkpointing_enable()
+            print("✓ 启用 Gradient Checkpointing")
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     # 添加 ignore_index 以忽略 padding token 的损失
     criterion = nn.CrossEntropyLoss(ignore_index=pad_token_id)
+
+    # 初始化 AMP Scaler
+    scaler = None
+    if use_amp and device == "cuda":
+        scaler = torch.cuda.amp.GradScaler()
+    elif use_amp:
+        use_amp = False
+
+    # 训练配置
+    effective_batch_size = batch_size * gradient_accumulation_steps
+    print(f"\n配置: batch={batch_size}×{gradient_accumulation_steps}={effective_batch_size}, AMP={'✓' if use_amp else '✗'}, GradCP={'✓' if gradient_checkpointing else '✗'}, device={device}")
 
     # 学习率调度器
     scheduler = None
@@ -158,27 +187,24 @@ def train_encoder_decoder(
             num_training_steps=num_training_steps,
             warmup_ratio=warmup_ratio
         )
-        print(f"使用 {scheduler_type} 学习率调度器")
-        print(f"Warmup 步数: {scheduler.num_warmup_steps}")
-        print(f"总训练步数: {num_training_steps}")
 
     # 保存最佳模型
     best_val_loss = float('inf')
     best_model_path = "encoder_decoder_best.pt"
 
-    # TensorBoard 日志（云平台默认目录）
-    log_dir = f'/tb_logs/enc_dec_{d_model}d_{num_layers}L_{num_heads}H_bs{batch_size}'
+    # TensorBoard 日志
+    amp_suffix = "_amp" if use_amp else ""
+    log_dir = f'/hy-tmp/Net/logs/enc_dec_{d_model}d_{num_layers}L_{num_heads}H_bs{batch_size}x{gradient_accumulation_steps}{amp_suffix}'
     writer = SummaryWriter(log_dir=log_dir)
-    print(f"\n📊 TensorBoard 日志目录: {log_dir}")
-    print(f"💡 启动 TensorBoard 查看训练进度:")
-    print(f"   tensorboard --logdir=/tb_logs --port=6006")
-    print(f"   然后访问: http://localhost:6006\n")
+    print(f"TensorBoard: {log_dir}")
 
     try:
         for epoch in range(1, epochs+1):
             model.train()
             total_loss = 0
-            for src, tgt in tqdm(train_loader, desc=f"Epoch {epoch} - Train"):
+            optimizer.zero_grad()  # 在 epoch 开始时清零梯度
+
+            for batch_idx, (src, tgt) in enumerate(tqdm(train_loader, desc=f"Epoch {epoch} - Train")):
                 src, tgt = src.to(device), tgt.to(device)
                 # tgt: [B, L]，输入为[:-1]，目标为[1:]
                 tgt_input = tgt[:, :-1]
@@ -190,22 +216,69 @@ def train_encoder_decoder(
                 tgt_mask = combine_masks(tgt_causal_mask, tgt_padding_mask)
                 cross_mask = create_padding_mask(src, pad_token_id=pad_token_id)
 
-                logits, _ = model(src, tgt_input, src_mask=src_mask, tgt_mask=tgt_mask, cross_mask=cross_mask)
-                loss = criterion(logits.view(-1, tgt_vocab_size), tgt[:, 1:].reshape(-1))
-                optimizer.zero_grad()
-                loss.backward()
+                # 使用 AMP 进行前向和反向传播
+                if use_amp and scaler is not None:
+                    with torch.cuda.amp.autocast():
+                        logits, _ = model(src, tgt_input, src_mask=src_mask, tgt_mask=tgt_mask, cross_mask=cross_mask)
+                        loss = criterion(logits.view(-1, tgt_vocab_size), tgt[:, 1:].reshape(-1))
+                        # 梯度累积：缩放 loss
+                        loss = loss / gradient_accumulation_steps
 
-                # 梯度裁剪
+                    scaler.scale(loss).backward()
+                else:
+                    logits, _ = model(src, tgt_input, src_mask=src_mask, tgt_mask=tgt_mask, cross_mask=cross_mask)
+                    loss = criterion(logits.view(-1, tgt_vocab_size), tgt[:, 1:].reshape(-1))
+                    # 梯度累积：缩放 loss
+                    loss = loss / gradient_accumulation_steps
+                    loss.backward()
+
+                # 累积真实 loss（不缩放）用于日志记录
+                total_loss += loss.item() * gradient_accumulation_steps
+
+                # 每 gradient_accumulation_steps 步更新一次参数
+                if (batch_idx + 1) % gradient_accumulation_steps == 0:
+                    # 梯度裁剪
+                    if max_grad_norm > 0:
+                        if use_amp and scaler is not None:
+                            scaler.unscale_(optimizer)
+                            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                            scaler.step(optimizer)
+                            scaler.update()
+                        else:
+                            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                            optimizer.step()
+                    else:
+                        if use_amp and scaler is not None:
+                            scaler.step(optimizer)
+                            scaler.update()
+                        else:
+                            optimizer.step()
+
+                    optimizer.zero_grad()
+
+                    # 更新学习率（每次参数更新后）
+                    if scheduler is not None:
+                        scheduler.step()
+
+            # 处理最后一个不完整的累积批次
+            if len(train_loader) % gradient_accumulation_steps != 0:
                 if max_grad_norm > 0:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                    if use_amp and scaler is not None:
+                        scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                        optimizer.step()
+                else:
+                    if use_amp and scaler is not None:
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        optimizer.step()
+                optimizer.zero_grad()
 
-                optimizer.step()
-
-                # 更新学习率
-                if scheduler is not None:
-                    scheduler.step()
-
-                total_loss += loss.item()
             avg_loss = total_loss / len(train_loader)
             current_lr = optimizer.param_groups[0]['lr']
             print(f"Epoch {epoch} Train Loss: {avg_loss:.4f}, LR: {current_lr:.2e}")
@@ -228,11 +301,22 @@ def train_encoder_decoder(
                     tgt_mask = combine_masks(tgt_causal_mask, tgt_padding_mask)
                     cross_mask = create_padding_mask(src, pad_token_id=pad_token_id)
 
-                    logits, _ = model(src, tgt_input, src_mask=src_mask, tgt_mask=tgt_mask, cross_mask=cross_mask)
-                    loss = criterion(logits.view(-1, tgt_vocab_size), tgt[:, 1:].reshape(-1))
+                    # 使用 AMP 进行验证
+                    if use_amp and scaler is not None:
+                        with torch.cuda.amp.autocast():
+                            logits, _ = model(src, tgt_input, src_mask=src_mask, tgt_mask=tgt_mask, cross_mask=cross_mask)
+                            loss = criterion(logits.view(-1, tgt_vocab_size), tgt[:, 1:].reshape(-1))
+                    else:
+                        logits, _ = model(src, tgt_input, src_mask=src_mask, tgt_mask=tgt_mask, cross_mask=cross_mask)
+                        loss = criterion(logits.view(-1, tgt_vocab_size), tgt[:, 1:].reshape(-1))
+
                     val_loss += loss.item()
             avg_val_loss = val_loss / len(val_loader)
             print(f"Epoch {epoch} Val Loss: {avg_val_loss:.4f}")
+
+            # Demo 翻译测试
+            test_translation_demo(model, tokenizer, demo_sentences, device)
+            model.train()  # 切回训练模式
 
             # 记录验证指标到 TensorBoard
             writer.add_scalar('Loss/validation', avg_val_loss, epoch)
@@ -241,7 +325,7 @@ def train_encoder_decoder(
                 'validation': avg_val_loss
             }, epoch)
 
-            # 如果当前验证损失更低，保存最佳模型
+            # 保存最佳模型
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
                 checkpoint = {
@@ -263,66 +347,32 @@ def train_encoder_decoder(
                 if scheduler is not None:
                     checkpoint['scheduler_state_dict'] = scheduler.state_dict()
                 torch.save(checkpoint, best_model_path)
-                print(f"✓ 最佳模型已保存: {best_model_path} (Val Loss: {avg_val_loss:.4f})")
-            else:
-                print(f"  当前最佳 Val Loss: {best_val_loss:.4f}")
+                print(f"✓ 保存最佳模型 (Val Loss: {avg_val_loss:.4f})")
 
         print(f"\n训练完成！最佳验证损失: {best_val_loss:.4f}")
         writer.close()
 
     except KeyboardInterrupt:
-        print("\n\n训练被用户中断！")
-        # 保存当前状态
-        interrupt_path = "encoder_decoder_interrupted.pt"
-        checkpoint = {
+        print("\n中断！已保存到 encoder_decoder_interrupted.pt")
+        torch.save({
             'epoch': epoch if 'epoch' in locals() else 0,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'val_loss': best_val_loss,
-            'config': {
-                'src_vocab_size': src_vocab_size,
-                'tgt_vocab_size': tgt_vocab_size,
-                'd_model': d_model,
-                'num_layers': num_layers,
-                'num_heads': num_heads,
-                'd_ff': d_ff,
-                'max_len': max_len,
-                'dropout': 0.1,
-            }
-        }
-        if scheduler is not None:
-            checkpoint['scheduler_state_dict'] = scheduler.state_dict()
-        torch.save(checkpoint, interrupt_path)
-        print(f"✓ 中断时的模型已保存: {interrupt_path}")
-        print(f"当前最佳验证损失: {best_val_loss:.4f}")
+            'config': {'src_vocab_size': src_vocab_size, 'tgt_vocab_size': tgt_vocab_size,
+                      'd_model': d_model, 'num_layers': num_layers, 'num_heads': num_heads,
+                      'd_ff': d_ff, 'max_len': max_len, 'dropout': 0.1}
+        }, "encoder_decoder_interrupted.pt")
         writer.close()
 
     except Exception as e:
-        print(f"\n\n训练过程中发生错误: {type(e).__name__}: {e}")
-        # 保存当前状态以便调试
-        error_path = "encoder_decoder_error.pt"
-        checkpoint = {
+        print(f"\n错误: {type(e).__name__}: {e}")
+        torch.save({
             'epoch': epoch if 'epoch' in locals() else 0,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'val_loss': best_val_loss,
-            'config': {
-                'src_vocab_size': src_vocab_size,
-                'tgt_vocab_size': tgt_vocab_size,
-                'd_model': d_model,
-                'num_layers': num_layers,
-                'num_heads': num_heads,
-                'd_ff': d_ff,
-                'max_len': max_len,
-                'dropout': 0.1,
-            }
-        }
-        if scheduler is not None:
-            checkpoint['scheduler_state_dict'] = scheduler.state_dict()
-        torch.save(checkpoint, error_path)
-        print(f"✓ 错误时的模型已保存: {error_path}")
+            'model_state_dict': model.state_dict()
+        }, "encoder_decoder_error.pt")
         writer.close()
-        raise  # 重新抛出异常以便查看完整堆栈跟踪
+        raise
 
 if __name__ == "__main__":
-    train_encoder_decoder(epochs=100)
+    train_encoder_decoder(epochs=10)

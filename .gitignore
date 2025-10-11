@@ -57,19 +57,12 @@ Thumbs.db
 logs/
 runs/
 
-# 大型数据文件
-data/**/*.pt
-data/**/*_ids.pt
-data/iwslt2017/train.*.txt
-data/iwslt2017/validation.*.txt
-data/iwslt2017/test.*.txt
+# 数据文件（用户应自行下载和处理）
+data/
 
-# 保留小型数据集（wikitext2原始文本）
-!data/wikitext2/*.txt
-
-# Tokenizer缓存
-# tokenization/gpt2/
-# 注释掉以便提交tokenizer
+# Trained SentencePiece tokenizer (should be trained locally)
+tokenization/sentencepiece_enzh.model
+tokenization/sentencepiece_enzh.vocab
 
 # 临时文件
 *.tmp

@@ -1,6 +1,6 @@
 import torch
 from models.transformer_models import EncoderDecoderModel
-from transformers import GPT2TokenizerFast
+from utils.sentencepiece_tokenizer import SentencePieceTokenizer
 from utils.translation_utils import (
     beam_search_translate,
     greedy_translate,
@@ -11,9 +11,9 @@ import os
 
 def main():
     model_path = "encoder_decoder_best.pt"  # 使用最佳模型
-    tokenizer_dir = "tokenization/gpt2"
+    tokenizer_path = "tokenization/sentencepiece_enzh.model"
     device = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
-    tokenizer = GPT2TokenizerFast.from_pretrained(tokenizer_dir)
+    tokenizer = SentencePieceTokenizer.from_pretrained(tokenizer_path)
     src_vocab_size = tgt_vocab_size = tokenizer.vocab_size
 
     print(f"正在从 {model_path} 加载模型...")
@@ -32,15 +32,8 @@ def main():
     if not checkpoint_info:
         print("警告：使用默认配置，如果训练时修改了配置，翻译结果可能不正确\n")
 
-    print("=" * 60)
-    print("翻译模式说明:")
-    print("  1. Greedy    - 快速，每步选最优 token")
-    print("  2. Beam      - 高质量，搜索多个候选序列 (推荐)")
-    print("  3. Top-K     - 随机性，从 top-k 中采样")
-    print("  4. Top-P     - 随机性，nucleus 采样")
-    print("=" * 60)
-
-    print("\n请输入英文句子，回车翻译，输入 exit 退出：")
+    print("\n解码策略: [1] Beam Search ⭐ [2] Top-P [3] Greedy [4] Top-K")
+    print("输入英文句子翻译，exit 退出\n")
 
     while True:
         src = input("\nEN> ").strip()
@@ -50,26 +43,19 @@ def main():
         if not src:
             continue
 
-        print("选择生成方式 [1-Greedy/2-Beam/3-Top-K/4-Top-P] (默认2): ", end="")
-        mode = input().strip() or "2"
-
+        mode = input("策略 [1-Beam/2-TopP/3-Greedy/4-TopK] (默认1): ").strip() or "1"
         src_ids = tokenizer.encode(src, add_special_tokens=False)
 
         try:
             if mode == "1":
-                print("使用 Greedy Decoding...")
-                zh = greedy_translate(model, src_ids, tokenizer, max_len=50, device=device)
-            elif mode == "2":
-                print("使用 Beam Search (beam_width=5)...")
                 zh = beam_search_translate(model, src_ids, tokenizer, beam_width=5, max_len=50, device=device)
-            elif mode == "3":
-                print("使用 Top-K Sampling (k=10)...")
-                zh = top_k_translate(model, src_ids, tokenizer, k=10, max_len=50, device=device)
-            elif mode == "4":
-                print("使用 Top-P Sampling (p=0.9)...")
+            elif mode == "2":
                 zh = top_p_translate(model, src_ids, tokenizer, p=0.9, max_len=50, device=device)
+            elif mode == "3":
+                zh = greedy_translate(model, src_ids, tokenizer, max_len=50, device=device)
+            elif mode == "4":
+                zh = top_k_translate(model, src_ids, tokenizer, k=10, max_len=50, device=device)
             else:
-                print("无效选择，使用默认 Beam Search...")
                 zh = beam_search_translate(model, src_ids, tokenizer, beam_width=5, max_len=50, device=device)
 
             print(f"ZH> {zh}")

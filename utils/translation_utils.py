@@ -47,6 +47,8 @@ def beam_search_translate(model, src_ids, tokenizer, beam_width=5, max_len=50, d
 
     # 初始化 beams: [(序列, 累积log概率)]
     # GPT2 tokenizer 没有 BOS，使用 EOS 作为 BOS
+    # 注意：即使 bos_id == eos_token_id（如使用 GPT2），下面的 len(seq) > 1 条件
+    # 也能确保初始序列 [bos_id] 不会被立即判定为完成
     bos_id = tokenizer.bos_token_id if tokenizer.bos_token_id is not None else tokenizer.eos_token_id
     beams = [(torch.tensor([bos_id], dtype=torch.long, device=device), 0.0)]
 
@@ -56,7 +58,11 @@ def beam_search_translate(model, src_ids, tokenizer, beam_width=5, max_len=50, d
         candidates = []
 
         for seq, score in beams:
-            # 如果已经生成了 EOS（且不是第一步的 BOS），放入 completed
+            # 如果序列已经生成了 EOS，放入 completed
+            # 条件说明：
+            # - len(seq) > 1: 确保至少生成了一个新 token（排除初始的 [bos_id]）
+            #   即使 bos_id == eos_token_id，初始序列 len=1 也不满足此条件
+            # - seq[-1] == eos_token_id: 最后一个 token 是 EOS
             if len(seq) > 1 and seq[-1].item() == tokenizer.eos_token_id:
                 completed.append((seq, score))
                 continue
@@ -152,7 +158,8 @@ def greedy_translate(model, src_ids, tokenizer, max_len=50, device="cpu"):
     """
     model.eval()
 
-    # GPT2 tokenizer 没有 BOS，使用 EOS 作为 BOS
+    # 获取起始 token
+    # GPT2 tokenizer 没有 BOS，使用 EOS 作为 BOS（这是常见做法）
     bos_id = tokenizer.bos_token_id if tokenizer.bos_token_id is not None else tokenizer.eos_token_id
     pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
 
@@ -204,7 +211,8 @@ def top_k_translate(model, src_ids, tokenizer, k=10, max_len=50, device="cpu", t
     """
     model.eval()
 
-    # GPT2 tokenizer 没有 BOS，使用 EOS 作为 BOS
+    # 获取起始 token
+    # GPT2 tokenizer 没有 BOS，使用 EOS 作为 BOS（这是常见做法）
     bos_id = tokenizer.bos_token_id if tokenizer.bos_token_id is not None else tokenizer.eos_token_id
     pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
 
@@ -264,7 +272,8 @@ def top_p_translate(model, src_ids, tokenizer, p=0.9, max_len=50, device="cpu", 
     """
     model.eval()
 
-    # GPT2 tokenizer 没有 BOS，使用 EOS 作为 BOS
+    # 获取起始 token
+    # GPT2 tokenizer 没有 BOS，使用 EOS 作为 BOS（这是常见做法）
     bos_id = tokenizer.bos_token_id if tokenizer.bos_token_id is not None else tokenizer.eos_token_id
     pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
 
