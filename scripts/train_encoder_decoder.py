@@ -166,12 +166,12 @@ def train_encoder_decoder(
     best_val_loss = float('inf')
     best_model_path = "encoder_decoder_best.pt"
 
-    # TensorBoard 日志
-    log_dir = f'runs/enc_dec_{d_model}d_{num_layers}L_{num_heads}H_bs{batch_size}'
+    # TensorBoard 日志（云平台默认目录）
+    log_dir = f'/tb_logs/enc_dec_{d_model}d_{num_layers}L_{num_heads}H_bs{batch_size}'
     writer = SummaryWriter(log_dir=log_dir)
     print(f"\n📊 TensorBoard 日志目录: {log_dir}")
     print(f"💡 启动 TensorBoard 查看训练进度:")
-    print(f"   tensorboard --logdir=runs --port=6006")
+    print(f"   tensorboard --logdir=/tb_logs --port=6006")
     print(f"   然后访问: http://localhost:6006\n")
 
     try:
