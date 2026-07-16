@@ -19,11 +19,11 @@ def check_python_version():
     if version.major == 3 and version.minor >= 11:
         print("✅ Python版本正常（推荐3.11）")
         return True
-    elif version.major == 3 and version.minor >= 8:
+    elif version.major == 3 and version.minor >= 10:
         print("⚠️  Python版本可用但建议升级到3.11")
         return True
     else:
-        print("❌ Python版本过低，需要3.8+")
+        print("❌ Python版本过低，需要3.10+")
         return False
 
 def check_pytorch():
@@ -104,10 +104,10 @@ def check_dependencies():
 
     return all_ok
 
-def test_simple_computation():
-    """测试简单的GPU计算"""
+def test_device_computation():
+    """测试当前可用设备上的基础计算。"""
     print("\n" + "=" * 60)
-    print("测试GPU计算...")
+    print("测试设备计算...")
     print("=" * 60)
 
     try:
@@ -121,10 +121,10 @@ def test_simple_computation():
         z = torch.matmul(x, y)
 
         print(f"矩阵乘法测试: {z.shape}")
-        print("✅ GPU计算正常")
+        print("✅ 设备计算正常")
         return True
     except Exception as e:
-        print(f"❌ GPU计算失败: {e}")
+        print(f"❌ 设备计算失败: {e}")
         return False
 
 def check_model_files():
@@ -139,7 +139,10 @@ def check_model_files():
         'models',
         'utils',
         'scripts',
-        'test',
+        'finetuning',
+        'inference',
+        'evaluation',
+        'tests',
     ]
 
     optional_dirs = [
@@ -163,27 +166,37 @@ def check_model_files():
 
     return all_ok
 
-def run_fix_tests():
-    """运行修复验证测试"""
+def run_smoke_tests():
+    """Run the lightweight model smoke tests through pytest."""
     print("\n" + "=" * 60)
-    print("运行修复验证测试...")
+    print("运行模型 smoke tests...")
     print("=" * 60)
 
     try:
+        import importlib.util
         import subprocess
         import sys
+
+        if importlib.util.find_spec('pytest') is None:
+            print("ℹ️  未安装 pytest，跳过 smoke tests")
+            print("   开发环境可运行: python -m pip install -r requirements-dev.txt")
+            return True
+
         result = subprocess.run(
-            [sys.executable, 'test/test_fixes.py'],
+            [
+                sys.executable,
+                '-m',
+                'pytest',
+                '-q',
+                'tests/test_model_basics.py',
+            ],
             capture_output=True,
             text=True,
             timeout=60
         )
 
         if result.returncode == 0:
-            print("✅ 所有修复测试通过")
-            # 显示测试输出的关键部分
-            if "🎉 所有测试通过！" in result.stdout:
-                print("   代码修复验证成功！")
+            print("✅ 模型 smoke tests 通过")
             return True
         else:
             print("❌ 测试失败")
@@ -196,7 +209,7 @@ def run_fix_tests():
             return False
     except Exception as e:
         print(f"⚠️  无法运行测试: {e}")
-        print("提示: 可以手动运行: python test/test_fixes.py")
+        print("提示: 可以手动运行: python -m pytest tests/test_model_basics.py")
         return False
 
 def print_recommendations():
@@ -241,7 +254,7 @@ def main():
     """主函数"""
     print("\n" + "=" * 60)
     print("云平台环境检查脚本")
-    print("目标环境: PyTorch 2.5.1.1 + CUDA 12.4.1 + Python 3.11")
+    print("项目要求: PyTorch 2.0+ + Python 3.10+")
     print("=" * 60)
 
     checks = []
@@ -251,9 +264,9 @@ def main():
     checks.append(("PyTorch", check_pytorch()))
     checks.append(("CUDA", check_cuda()))
     checks.append(("依赖", check_dependencies()))
-    checks.append(("GPU计算", test_simple_computation()))
+    checks.append(("设备计算", test_device_computation()))
     checks.append(("项目文件", check_model_files()))
-    checks.append(("修复测试", run_fix_tests()))
+    checks.append(("模型 smoke tests", run_smoke_tests()))
 
     # 总结
     print("\n" + "=" * 60)
@@ -270,16 +283,7 @@ def main():
     if all_passed:
         print("🎉 所有检查通过！环境配置正确，可以开始训练！")
         print()
-        print("下一步操作：")
-        print("1. 准备数据：")
-        print("   cd scripts")
-        print("   python download_datasets.py")
-        print("   python preprocess.py")
-        print()
-        print("2. 开始训练：")
-        print("   python train_decoder.py  # Decoder-Only模型")
-        print("   或")
-        print("   python train_encoder_decoder.py  # Encoder-Decoder模型")
+        print("下一步操作请查看: README.md")
     else:
         print("⚠️  部分检查未通过，请根据上述提示修复问题")
         print()
@@ -292,7 +296,7 @@ def main():
     print_recommendations()
 
     print()
-    print("详细部署指南请查看: CLOUD_DEPLOYMENT_CHECKLIST.md")
+    print("学习路线请查看: docs/00-learning-path-and-code-map.md")
     print("=" * 60)
 
     return 0 if all_passed else 1

@@ -7,10 +7,10 @@
    python -m scripts.train_encoder_decoder 2>&1 | tee training.log
 
 2. 在另一个终端运行此脚本：
-   python scripts/visualize_training.py training.log
+   python -m scripts.visualize_training training.log
 
 3. 或者使用 watch 实时更新：
-   watch -n 5 python scripts/visualize_training.py training.log
+   watch -n 5 python -m scripts.visualize_training training.log
 """
 
 import re
@@ -97,16 +97,16 @@ def plot_training_progress(epochs, train_losses, val_losses, learning_rates, out
 
 def main():
     if len(sys.argv) < 2:
-        print("用法: python visualize_training.py <log_file>")
+        print("用法: python -m scripts.visualize_training <log_file>")
         print("\n示例:")
         print("  # 实时记录训练日志")
         print("  python -m scripts.train_encoder_decoder 2>&1 | tee training.log")
         print()
         print("  # 在另一个终端可视化")
-        print("  python scripts/visualize_training.py training.log")
+        print("  python -m scripts.visualize_training training.log")
         print()
         print("  # 或使用 watch 自动更新（每5秒）")
-        print("  watch -n 5 python scripts/visualize_training.py training.log")
+        print("  watch -n 5 python -m scripts.visualize_training training.log")
         sys.exit(1)
 
     log_file = sys.argv[1]

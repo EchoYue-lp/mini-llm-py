@@ -3,10 +3,6 @@
 用于从保存的 checkpoint 继续训练
 """
 
-import sys
-import os
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
 import argparse
 from utils.checkpoint_utils import get_model_info, infer_model_config_from_checkpoint
 

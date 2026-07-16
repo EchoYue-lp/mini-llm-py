@@ -4,8 +4,6 @@
 
 import torch
 import os
-import sys
-sys.path.insert(0, '.')
 from utils.sentencepiece_tokenizer import SentencePieceTokenizer
 from tqdm import tqdm
 
@@ -75,7 +73,7 @@ def main():
     if not os.path.exists(tokenizer_path):
         print(f"❌ 错误: Tokenizer 模型文件不存在: {tokenizer_path}")
         print()
-        print("请先运行: python scripts/train_sentencepiece.py")
+        print("请先运行: python -m scripts.train_sentencepiece")
         return
 
     # 加载 tokenizer
@@ -189,10 +187,10 @@ def main():
     print("1. 训练脚本已自动更新（如需手动修改，编辑 scripts/train_encoder_decoder.py）")
     print()
     print("2. 开始训练:")
-    print("   python scripts/train_encoder_decoder.py")
+    print("   python -m scripts.train_encoder_decoder")
     print()
     print("3. 使用新 tokenizer 进行翻译:")
-    print("   python scripts/translate.py")
+    print("   python -m scripts.translate")
     print()
     print("4. 预期改进:")
     print("   - 模型参数减少 ~60%")

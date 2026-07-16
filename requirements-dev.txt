@@ -1,0 +1,4 @@
+# PyTorch development environment: runtime dependencies plus tests.
+-r requirements.txt
+
+pytest>=8.0.0

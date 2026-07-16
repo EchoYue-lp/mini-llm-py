@@ -3,8 +3,6 @@
 诊断翻译模型问题
 """
 import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import torch
 from transformers import GPT2TokenizerFast
@@ -148,7 +146,7 @@ if __name__ == "__main__":
     if not checkpoints:
         print("❌ 未找到模型检查点文件")
         print("\n请确保在项目根目录运行，或指定检查点路径:")
-        print("  python scripts/diagnose_translation.py <checkpoint_path>")
+        print("  python -m scripts.diagnose_translation <checkpoint_path>")
         sys.exit(1)
 
     if len(sys.argv) > 1:

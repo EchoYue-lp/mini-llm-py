@@ -73,13 +73,13 @@ def main():
         epilog="""
 示例用法:
   # 下载翻译数据集（IWSLT2017）
-  python scripts/download_datasets.py --translation
+  python -m scripts.download_datasets --translation
 
   # 下载生成数据集（WikiText-2）
-  python scripts/download_datasets.py --generation
+  python -m scripts.download_datasets --generation
 
   # 下载所有数据集
-  python scripts/download_datasets.py --all
+  python -m scripts.download_datasets --all
         """
     )
 

@@ -1,220 +1,191 @@
-# Transformer 英中翻译与文本生成
+# mini-llm-py
 
-基于 PyTorch 从零实现的 Transformer 模型，支持英中机器翻译和文本生成任务。
+`mini-llm-py` 是一个从 Transformer 基础实现延伸到 LLM 后训练的学习型项目。
+仓库同时包含：
 
-## 📚 学习路线
+- 使用 PyTorch 从零实现的 Encoder-Decoder 和 Decoder-Only Transformer。
+- 从位置编码、Attention 到 KV Cache、LoRA、GQA 和 MoE 的 12 个小实验。
+- 英中翻译与文本生成的数据、训练、checkpoint、推理闭环。
+- 使用 Apple MLX 和 Qwen3-0.6B 完成的 LoRA 工具路由后训练实验。
 
-这个仓库现在分为四层：
+项目中的 Python 命令都从仓库根目录以 `python -m package.module` 运行。模型、
+adapter、日志和评测结果与源代码分离，统一写入 Git 忽略的运行目录。
 
-1. `labs/`：单概念、可直接运行的小实验。
-2. `models/`、`utils/`：从零实现的完整 Transformer 组件。
-3. `scripts/`：数据、训练、checkpoint 和生成闭环。
-4. `posttraining/mlx_tool_router/`：在 Apple Silicon 上学习 Qwen、LoRA、数据构造、
-   adapter 保存/重载与工具路由评测。
+## 目录结构
 
-建议先读 [文档索引](docs/README.md)，再按顺序运行 `labs/`。内容覆盖位置编码、
-Self-Attention、Multi-Head Attention、Decoder/CausalLM、KV Cache、LoRA、
-MHA/MQA/GQA、Dense/Sparse/Shared-Expert MoE，以及训练这些结构所需的 mask、归一化、
-FFN、next-token loss 和解码策略。
-
-- [Transformer 基础：从 token 到 logits](docs/transformer-fundamentals.md)
-- [现代 LLM 组件与 MoE](docs/modern-llm-and-moe.md)
-- [两个学习仓库的审查与合并记录](docs/repository-merge-review.md)
-- [12 个 Transformer 小实验](labs/README.md)
-- [MLX LoRA 工具路由实验](posttraining/mlx_tool_router/README.md)
-
-## 🌟 项目特点
-
-- **双架构支持**
-  - Encoder-Decoder：用于英中翻译（Pre-LN，6层编码器+6层解码器）
-  - Decoder-Only：用于文本生成（Pre-LN，2层解码器）
-
-- **智能分词方案**
-  - 翻译任务：自训练 SentencePiece（16k词汇，中文高效）
-  - 生成任务：GPT-2 Tokenizer（50k词汇，英文覆盖广）
-
-- **完整训练机制**
-  - 混合精度训练（AMP）- 在支持的 CUDA 设备上降低显存并提高吞吐
-  - 梯度累积 - 模拟大 batch size
-  - 学习率调度 - Warmup + Cosine Decay
-  - TensorBoard 可视化 - 实时监控训练进度
-
-- **多种解码策略**
-  - Beam Search（推荐用于翻译）
-  - Top-P/Top-K 采样（用于创造性生成）
-  - Greedy Decoding（快速推理）
-
-## 📦 环境要求
-
-**Python**: 3.10+（推荐 3.11 或 3.12）
-
-**安装依赖**：
-```bash
-pip install -r requirements.txt
+```text
+mini-llm-py/
+├── docs/             所有专题文档
+├── evaluation/       数据校验、模型评测和结果对比
+├── finetuning/       MLX LoRA 短训练与长训练
+├── inference/        基座模型和 adapter 推理
+├── labs/             12 个 Transformer / LLM 小实验
+├── models/           PyTorch Transformer 模型实现
+├── scripts/          数据准备、模型下载、训练和推理入口
+├── tests/            pytest 测试
+├── tokenization/     tokenizer 构建代码与 GPT-2 静态资源
+├── utils/            mask、checkpoint、生成、调度器和共享路径
+├── artifacts/        模型、adapter 和评测结果，本地生成
+├── data/             下载或生成的数据，本地生成
+├── requirements.txt
+├── requirements-dev.txt
+└── requirements-mlx.txt
 ```
 
-### 硬件分档
+源码依赖保持单向：
 
-本项目默认模型很小：Decoder-Only 约 `13.45M` 参数，Encoder-Decoder 约 `8.94M`
-参数；FP32 权重本身分别约 `51 MiB` 和 `34 MiB`。训练时还需要梯度、Adam 一阶/二阶
-状态和激活，显存/内存消耗主要由 `batch_size`、序列长度和层数决定，而不是只看权重文件。
+```text
+scripts / labs / tests / finetuning / inference / evaluation
+                              |
+                              v
+                         models + utils
+```
 
-| 使用范围 | 最小配置（能运行） | 推荐配置（体验较好） | 说明 |
-| --- | --- | --- | --- |
-| 文档、单元测试、`lab00-03`、`lab06-11` | 2 核 CPU、4 GB RAM | 4 核以上 CPU、8 GB RAM | 不需要 GPU，单次运行通常为秒级 |
-| 微型训练 `lab04-05` | 4 核 CPU、4 GB RAM | 8 核 CPU、8 GB RAM，或任意可用 CUDA/MPS GPU | 默认任务可在 CPU 上完成，用于验证 loss 下降和生成结果 |
-| 完整 Transformer 前向、推理和小 batch smoke training | 4 核 CPU、8 GB RAM；或 4 GB 显存/统一内存余量 | 8 GB 以上显存，或 16 GB Apple 统一内存 | 建议先用 `batch_size=4-16`、`max_len=32-64` 验证链路 |
-| 默认 IWSLT/WikiText 完整训练 | 6 GB 显存；或 16 GB Apple 统一内存；CPU 需 16 GB RAM 但很慢 | 8-12 GB CUDA 显存 + 16 GB RAM；或 24 GB Apple 统一内存 | 默认 `batch_size` 较大，长期训练优先 CUDA；4 GB GPU 需明显降低 batch/长度 |
-| MLX Qwen3-0.6B LoRA 子项目 | 已验证 M1 Pro、16 GB 统一内存 | 16-24 GB Apple 统一内存 | 2-step `batch_size=2` 实测峰值约 1.834 GB；8 GB 设备没有实机验证，因此不列为最低配置 |
+## 环境要求
 
-磁盘建议至少预留 `10 GB`，推荐 `20 GB`，用于 Python 环境、原始数据、tokenized 数据、
-checkpoint 和 TensorBoard 日志。运行 MLX 子项目时还要额外预留约 1.4 GB 基座模型及多个
-adapter、评测结果的空间；更稳妥的总磁盘预算是 `15-20 GB`。
+项目保留三份依赖文件，它们不是三套互相重复的依赖：
 
-### 不同设备的注意事项
+| 文件 | 用途 | 应安装到哪里 |
+| --- | --- | --- |
+| `requirements.txt` | PyTorch 模型、训练和推理运行时 | `.venv` |
+| `requirements-dev.txt` | 继承运行时依赖，再增加 pytest | `.venv` |
+| `requirements-mlx.txt` | Apple Silicon 的 MLX 后训练 | `.venv-mlx` |
 
-- **CUDA**：当前训练脚本会在 CUDA 上启用 autocast 和 GradScaler；这是完整训练的首选。
-  参考 [PyTorch AMP examples](https://docs.pytorch.org/docs/stable/notes/amp_examples.html)。
-- **Apple Silicon / MPS**：PyTorch 可通过 [MPS 后端](https://docs.pytorch.org/docs/stable/notes/mps.html)
-  使用 Metal GPU，但当前项目的 AMP 分支
-  只针对 CUDA，因此按 FP32 和更高统一内存占用预估。统一内存还要与 macOS 和其他应用共享。
-- **CPU**：所有实验和测试均可运行，适合理解原理和 smoke test；不建议用 CPU 跑多轮完整
-  数据集训练。
+`requirements-dev.txt` 第一行通过 `-r requirements.txt` 复用运行依赖，因此日常开发
+只需安装它。MLX 对平台和底层运行时有独立要求，不与 PyTorch 环境合并；否则非
+Apple Silicon 用户也会被迫解析 MLX 包，两个框架的升级还会互相影响。
 
-“最小配置”表示通过降低 batch 或序列长度能够完成流程，不代表保持 README 默认参数时
-仍有理想速度。
+### PyTorch 环境
 
-`requirements.txt` 已包含 PyTorch；若云平台要求特定 CUDA wheel，请按平台说明先安装
-对应 PyTorch，再安装其余依赖。
-
-MLX 子项目有独立依赖，不应与根 PyTorch 环境强行混装：
+需要 Python 3.10 或更高版本，推荐 3.11 或 3.12：
 
 ```bash
-cd posttraining/mlx_tool_router
-python3 -m venv .venv
+python -m venv .venv
 source .venv/bin/activate
-python -m pip install -r requirements.txt
+python -m pip install --upgrade pip
+python -m pip install -r requirements-dev.txt
 ```
 
-## 🚀 快速开始
+只运行项目、不执行测试时，可以安装 `requirements.txt`。
 
-### 方案一：英中翻译（推荐）
+安装后检查环境：
 
-#### 1. 准备数据
+```bash
+python check_cloud_env.py
+make check
+```
 
-下载 IWSLT2017 英中翻译数据集：
+### Apple MLX 环境
+
+MLX 训练使用独立环境，避免与根 PyTorch 依赖互相约束：
+
+```bash
+python -m venv .venv-mlx
+source .venv-mlx/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements-mlx.txt
+```
+
+该路径面向 Apple Silicon + Metal。已验证 MLX-LM 0.31.3 和
+Hugging Face Hub 1.23.0。
+
+## 学习路线
+
+建议先运行不依赖大数据集的实验：
+
+```bash
+python -m labs.lab00_positional_encoding
+python -m labs.lab01_attention_basics
+python -m labs.lab02_multi_head_attention
+python -m labs.lab03_pre_ln_block
+python -m labs.lab04_tiny_copy_task --steps 400
+python -m labs.lab05_tiny_language_model --steps 100
+python -m labs.lab06_kv_cache
+python -m labs.lab07_modern_blocks
+python -m labs.lab08_moe_routing
+python -m labs.lab09_lora_linear
+python -m labs.lab10_mha_mqa_gqa
+python -m labs.lab11_moe_variants
+```
+
+完整学习顺序见
+[00 学习路线与代码地图](docs/00-learning-path-and-code-map.md)。
+
+## PyTorch 英中翻译
+
+### 1. 下载数据
 
 ```bash
 python -m scripts.download_datasets --translation
 ```
 
-数据将保存到 `data/iwslt2017/`：
-```
-data/iwslt2017/
-├── train.en.txt / train.zh.txt
-├── validation.en.txt / validation.zh.txt
-└── test.en.txt / test.zh.txt
-```
-
-#### 2. 训练 SentencePiece 分词器
+### 2. 训练 SentencePiece
 
 ```bash
 python -m scripts.train_sentencepiece
 ```
 
-生成 `tokenization/sentencepiece_enzh.model` 和 `.vocab` 文件。
-
-#### 3. 预处理数据
+### 3. 生成 token id 数据
 
 ```bash
 python -m scripts.retokenize_dataset
 ```
 
-将文本转换为 token IDs，保存到 `data/iwslt2017/*_ids_sp.pt`。
-
-#### 4. 训练模型
+### 4. 训练 Encoder-Decoder
 
 ```bash
 python -m scripts.train_encoder_decoder
 ```
 
-**默认配置**：
-- d_model=128, 6层编码器+6层解码器, 4个注意力头
-- Batch size=64, 梯度累积=6（有效batch=384）
-- 学习率=2e-4（cosine调度+warmup）
-- 自动混合精度（AMP）
-
-**训练日志格式示意**（实际 loss 和翻译结果取决于数据与训练时长）：
-```
-Epoch 1 Train Loss: 5.2341, LR: 2.50e-04
-Epoch 1 Val Loss: 4.8765
-────────────────────────────────────────
-Demo 翻译测试:
-  EN: Hello, how are you?
-  ZH: 你好，你好吗？
-────────────────────────────────────────
-✓ 保存最佳模型 (Val Loss: 4.8765)
-```
-
-#### 5. 测试翻译
+### 5. 交互式翻译
 
 ```bash
 python -m scripts.translate
 ```
 
-交互式翻译：
-```
-EN> Hello world
-策略 [1-Beam/2-TopP/3-Greedy/4-TopK] (默认1): 1
-ZH> 你好世界
-```
+默认翻译模型使用 `d_model=128`、6 层 encoder、6 层 decoder、4 个注意力头和
+SentencePiece 16k 词表，约 8.94M 参数。
 
----
+## PyTorch 文本生成
 
-### 方案二：文本生成
-
-#### 1. 准备数据
-
-下载 WikiText-2 文本生成数据集：
+### 1. 下载 WikiText-2
 
 ```bash
 python -m scripts.download_datasets --generation
 ```
 
-数据将保存到 `data/wikitext2/`：
-```
-data/wikitext2/
-├── train.txt
-├── validation.txt
-└── test.txt
-```
-
-#### 2. 训练模型
-
-先把文本转换为带 EOS 边界的固定长度 token 序列：
+### 2. 预处理
 
 ```bash
 python -m scripts.preprocess --generation
 ```
 
-再训练模型：
+### 3. 训练 Decoder-Only
 
 ```bash
 python -m scripts.train_decoder
 ```
 
-#### 3. 生成文本
+### 4. 生成文本
 
 ```bash
 python -m scripts.generate
 ```
 
----
+默认生成模型使用 `d_model=128`、2 层 decoder、4 个注意力头和项目内 GPT-2
+tokenizer，约 13.5M 参数。
 
-### 从 checkpoint 恢复 PyTorch 训练
+## checkpoint 与训练监控
 
-训练脚本保存的完整 checkpoint 包含模型结构、权重、优化器、学习率调度器和当前 epoch；
-CUDA AMP 训练还会保存 GradScaler。继续训练 Decoder-Only：
+查看 checkpoint：
+
+```bash
+python -m scripts.resume_training \
+  --checkpoint decoder_only_best.pt \
+  --action info
+```
+
+继续训练：
 
 ```bash
 python -m scripts.resume_training \
@@ -224,207 +195,174 @@ python -m scripts.resume_training \
   --epochs 10
 ```
 
-继续训练 Encoder-Decoder：
-
-```bash
-python -m scripts.resume_training \
-  --checkpoint encoder_decoder_interrupted.pt \
-  --action resume \
-  --model_type encoder_decoder \
-  --epochs 5
-```
-
-`--epochs` 表示本次额外运行的 epoch 数。若数据或 tokenizer 不在默认位置，可传
-`--data_dir`、`--tokenizer_path`；训练恢复会校验 checkpoint 与 tokenizer 的词表大小。
-
----
-
-## 📊 训练监控
-
 启动 TensorBoard：
+
 ```bash
 tensorboard --logdir=runs --port=6006
 ```
 
-访问 `http://localhost:6006` 查看：
-- 训练/验证损失曲线
-- 学习率变化
-- 多模型对比
+## MLX LoRA 工具路由
 
-## 📁 项目结构
+该实验使用 Qwen3-0.6B 和 48 条教学数据，演示模型下载、基座推理、数据构造、
+Schema 校验、LoRA 短训练、LoRA 长训练、adapter 推理和固定测试集评测。
 
-```
-.
-├── models/                      # 模型定义
-│   ├── transformer_models.py   # Encoder-Decoder 和 Decoder-Only 模型
-│   ├── layers.py                # Multi-Head Attention, FFN, 位置编码
-│   └── decoder_encoder_layer.py # Encoder/Decoder 层实现
-│
-├── scripts/                     # 训练和推理脚本
-│   ├── train_encoder_decoder.py # 翻译模型训练
-│   ├── train_decoder.py         # 生成模型训练
-│   ├── resume_training.py       # 查看 checkpoint 或恢复训练
-│   ├── translate.py             # 翻译推理
-│   ├── generate.py              # 文本生成
-│   ├── train_sentencepiece.py  # 训练 SentencePiece
-│   └── retokenize_dataset.py   # 数据预处理
-│
-├── utils/                       # 工具函数
-│   ├── translation_utils.py    # Beam Search, Top-P 等解码策略
-│   ├── generation_utils.py     # 文本生成工具
-│   ├── mask_utils.py            # Attention Mask 创建
-│   ├── scheduler_utils.py       # 学习率调度器
-│   ├── sentencepiece_tokenizer.py # SentencePiece 封装
-│   └── checkpoint_utils.py      # 模型保存/加载
-│
-├── labs/                        # 单概念可运行实验（Attention 到 MoE/LoRA）
-├── docs/                        # Transformer、现代 LLM、合并审查文档
-├── posttraining/
-│   └── mlx_tool_router/         # MLX Qwen LoRA 与工具路由实验（独立环境）
-├── data/                        # 数据目录
-│   ├── iwslt2017/              # 翻译数据集
-│   └── wikitext2/              # 生成数据集
-│
-├── tokenization/               # 分词器
-│   ├── gpt2/                   # GPT-2 tokenizer
-│   └── sentencepiece_enzh.model # 自训练 SentencePiece
-│
-└── test/                       # 单元测试
-    ├── test_padding_mask.py
-    ├── test_beam_search.py
-    └── ...
+这套数据用于验证工程流程，不代表生产效果。
+
+### 1. 下载模型
+
+```bash
+python -m scripts.download_mlx_model
 ```
 
-## ⚙️ 模型配置
+模型保存到：
 
-### 翻译模型（Encoder-Decoder）
-
-| 参数 | 值 | 说明 |
-|------|-----|------|
-| d_model | 128 | 模型维度 |
-| 层数 | 6+6 | 编码器+解码器 |
-| 注意力头数 | 4 | Multi-Head Attention |
-| FFN 维度 | 512 | 前馈网络 |
-| 最大序列长度 | 96 | tokens |
-| Dropout | 0.1 | 正则化 |
-| Tokenizer | SentencePiece | 16k词汇 |
-| 参数量 | ~8.94M | 当前代码实测，包含 embedding |
-
-### 生成模型（Decoder-Only）
-
-| 参数 | 值 | 说明 |
-|------|-----|------|
-| d_model | 128 | 模型维度 |
-| 层数 | 2 | Decoder层 |
-| 注意力头数 | 4 | Multi-Head Attention |
-| FFN 维度 | 512 | 前馈网络 |
-| 最大序列长度 | 96 | tokens |
-| Tokenizer | GPT-2 | 50k词汇 |
-| 参数量 | ~13.5M | 包含 embedding |
-
-## 🔧 训练技巧
-
-### 1. 混合精度训练（AMP）
-```python
-use_amp = True  # CUDA only
-# 实际显存与速度收益取决于 GPU、batch、序列长度和算子
+```text
+artifacts/models/Qwen3-0.6B/
 ```
 
-### 2. 梯度累积
-```python
-batch_size = 64
-gradient_accumulation_steps = 6
-# 有效 batch size = 384
+### 2. 运行基座模型
+
+```bash
+python -m inference.base_model \
+  --prompt "用一句话解释什么是监督微调" \
+  --max-tokens 80
 ```
 
-### 3. 学习率调度
-- Warmup: 前 5-10% steps 线性增长
-- Cosine Decay: 后续平滑衰减到 0
+### 3. 准备并校验数据
 
-### 4. 梯度裁剪
-```python
-max_grad_norm = 1.0  # 防止梯度爆炸
+```bash
+python -m scripts.prepare_tool_router_data
+python -m evaluation.validate_tool_router_data
 ```
 
-## 💡 常见问题
+数据保存到：
 
-### Q: 显存不足（OOM）？
-**A**: 减小 batch_size 或增加 gradient_accumulation_steps：
-```python
-batch_size = 32  # 从 64 减少
-gradient_accumulation_steps = 12  # 从 6 增加
+```text
+data/tool_router/train.jsonl
+data/tool_router/valid.jsonl
+data/tool_router/test.jsonl
 ```
 
-### Q: 训练速度慢？
-**A**:
-1. 启用 AMP（仅 CUDA）：`use_amp = True`
-2. 减少 max_len：`max_len = 64`
-3. 使用更小的模型：`d_model = 64, num_layers = 4`
+### 4. LoRA 短训练
 
-### Q: 翻译质量差？
-**A**:
-1. 训练更多 epochs（30-50）
-2. 增大模型：`d_model = 256, num_layers = 12`
-3. 增加数据集
-4. 调整 beam_width（3-10）
+```bash
+python -m finetuning.train_lora_short --dry-run
+python -m finetuning.train_lora_short
+```
 
-### Q: 为什么用不同的 Tokenizer？
-**A**:
+adapter 保存到 `artifacts/adapters/tool-router-short/`。
 
-| 任务 | Tokenizer | 中文效率 | 原因 |
-|------|-----------|----------|------|
-| 翻译 | SentencePiece (16k) | ✅ 高 | 1汉字≈1token，序列更短 |
-| 生成 | GPT-2 (50k) | ❌ 低 | 1汉字≈3-5tokens，但英文覆盖广 |
+加载 adapter 推理：
 
-**示例**："我喜欢机器翻译"
-- SentencePiece: ~14 tokens
-- GPT-2: ~80 tokens
-- **效率提升**: 5.7x
+```bash
+python -m inference.tool_router \
+  "查一下订单A1024到哪里了" \
+  --adapter artifacts/adapters/tool-router-short
+```
 
-## 📈 性能测量
+### 5. 评测基座与短训模型
 
-训练时间和峰值显存受 PyTorch/CUDA 版本、数据长度分布、磁盘、设备功耗和后台进程影响，
-不再把单次机器记录当作通用基准。比较硬件或参数时，应固定随机种子和训练配置，并记录：
+```bash
+python -m evaluation.tool_router \
+  --label base \
+  --output artifacts/results/tool-router/base.json
 
-- 每个 epoch 的 wall-clock 时间和 tokens/s；
-- CUDA 的 `torch.cuda.max_memory_allocated()` 峰值；
-- train/validation loss，而不是只比较速度；
-- `batch_size`、梯度累积、`max_len`、AMP 状态和软件版本。
+python -m evaluation.tool_router \
+  --adapter artifacts/adapters/tool-router-short \
+  --label short-lora \
+  --output artifacts/results/tool-router/short-lora.json
+```
 
-对本项目而言，若只购买或租用一套通用学习环境，优先级通常是：`8-12 GB` CUDA 显存、
-`16 GB` 系统内存、`20 GB` 可用磁盘；若还要运行 MLX/Qwen 后训练，Apple Silicon 建议
-选择 `24 GB` 统一内存，`16 GB` 可完成当前 0.6B 教学实验但余量较小。
+### 6. LoRA 长训练
 
-## 🎯 解码策略对比
+```bash
+python -m finetuning.train_lora_long --dry-run
+python -m finetuning.train_lora_long --iters 300 --num-layers 16
+```
 
-| 策略 | 特点 | 适用场景 | 速度 |
-|------|------|----------|------|
-| Beam Search | 质量最高 | ⭐ 翻译（推荐） | 慢 |
-| Top-P | 多样性强 | 创意写作 | 中等 |
-| Greedy | 确定性 | 快速测试 | 快 |
-| Top-K | 可控随机 | 对话生成 | 中等 |
+adapter 保存到 `artifacts/adapters/tool-router-long/`。长训练会保存最佳验证
+checkpoint、最终 checkpoint、训练历史和过拟合分析。
 
-## 🛠 开发计划
+### 7. 三模型对比
 
-- [ ] 支持更多语言对（中英、法英等）
-- [ ] 添加 BLEU/METEOR 自动评测
-- [ ] 支持分布式训练（DDP）
-- [ ] Web UI 界面
-- [ ] 模型量化（INT8）和 ONNX 导出
+```bash
+python -m evaluation.compare_tool_router_models
+```
 
-## 📄 License
+详细报告写入：
 
-MIT License
+```text
+artifacts/results/tool-router/comparison.md
+```
 
-## 🙏 致谢
+完整流程见
+[14 MLX LoRA 工具路由完整流程](docs/14-mlx-lora-tool-router-workflow.md)，
+LoRA 原理、训练与评测分别见 11-13。
 
-- [IWSLT2017](https://wit3.fbk.eu/) - 翻译数据集
-- [PyTorch](https://pytorch.org/) - 深度学习框架
-- [Transformers](https://huggingface.co/transformers/) - Tokenizer
-- [SentencePiece](https://github.com/google/sentencepiece) - 分词工具
+## 运行产物
 
-## 📚 参考资料
+以下目录不属于源码，均由命令生成并被 Git 忽略：
 
-- [Attention Is All You Need](https://arxiv.org/abs/1706.03762) - Transformer 原论文
-- [On Layer Normalization in Transformers](https://arxiv.org/abs/2002.04745) - Pre-LN 架构
-- [The Illustrated Transformer](http://jalammar.github.io/illustrated-transformer/) - 可视化教程
+| 路径 | 内容 |
+| --- | --- |
+| `data/iwslt2017/` | 翻译数据 |
+| `data/wikitext2/` | 文本生成数据 |
+| `data/tool_router/` | MLX 工具路由数据 |
+| `artifacts/models/` | 下载的基座模型 |
+| `artifacts/adapters/` | LoRA adapter 与训练历史 |
+| `artifacts/results/` | JSON 和 Markdown 评测报告 |
+| `runs/`、`logs/` | TensorBoard 和训练日志 |
+| `*.pt`、`*.pth`、`*.ckpt` | PyTorch checkpoint |
+
+## 硬件建议
+
+| 使用范围 | 最低配置 | 推荐配置 |
+| --- | --- | --- |
+| 文档、测试、大部分小实验 | 2 核 CPU、4 GB RAM | 4 核 CPU、8 GB RAM |
+| PyTorch 微型训练 | 4 核 CPU、4 GB RAM | 8 GB RAM 或可用 CUDA/MPS |
+| IWSLT / WikiText 完整训练 | 6 GB GPU 或 16 GB RAM | 8-12 GB CUDA GPU、16 GB RAM |
+| MLX Qwen3-0.6B LoRA | 16 GB Apple 统一内存 | 16-24 GB Apple 统一内存 |
+
+建议预留 15-20 GB 磁盘，用于环境、数据、模型、checkpoint、adapter 和报告。
+
+## 开发与测试
+
+```bash
+make test
+make check
+```
+
+`make check` 会编译所有 Python 源码并运行 pytest。测试应使用小模型、临时目录和
+本地 tokenizer，不应依赖网络下载或已有 checkpoint。
+
+新增代码时：
+
+- 模型层放入 `models/`。
+- 通用训练、生成和路径逻辑放入 `utils/`。
+- 完整命令入口放入 `scripts/`。
+- 后训练实现按职责放入 `finetuning/`、`inference/`、`evaluation/`。
+- 教学实验放入 `labs/`。
+- 测试放入 `tests/`。
+- 除本文件外，所有 Markdown 文档放入 `docs/`。
+
+## 文档
+
+- [00 学习路线与代码地图](docs/00-learning-path-and-code-map.md)
+- [01 Tokenizer、Embedding 与 Logits](docs/01-tokenization-embedding-and-logits.md)
+- [02 位置编码与 RoPE](docs/02-positional-encoding-and-rope.md)
+- [03 Scaled Attention 与 Mask](docs/03-scaled-attention-and-masks.md)
+- [04 Multi-Head Attention 的 Shape](docs/04-multi-head-attention-shapes.md)
+- [05 FFN、残差与 Pre-LN Block](docs/05-transformer-blocks-ffn-and-pre-ln.md)
+- [06 Encoder-Decoder 与翻译训练](docs/06-encoder-decoder-translation-training.md)
+- [07 Decoder-Only、Loss 与生成](docs/07-decoder-only-loss-and-generation.md)
+- [08 KV Cache、MHA、MQA 与 GQA](docs/08-kv-cache-mqa-and-gqa.md)
+- [09 RMSNorm、RoPE 与 SwiGLU](docs/09-rmsnorm-rope-and-swiglu.md)
+- [10 MoE Router、Capacity 与专家](docs/10-moe-routing-capacity-and-experts.md)
+- [11 LoRA 低秩适配原理](docs/11-lora-low-rank-adaptation.md)
+- [12 LoRA 训练、Checkpoint 与过拟合](docs/12-lora-training-checkpoints-and-overfitting.md)
+- [13 工具路由数据与评测](docs/13-tool-routing-data-and-evaluation.md)
+- [14 MLX LoRA 工具路由完整流程](docs/14-mlx-lora-tool-router-workflow.md)
+
+## License
+
+[MIT](LICENSE)

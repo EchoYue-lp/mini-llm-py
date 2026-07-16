@@ -1,14 +1,7 @@
 """Lab 02: split a hidden state into heads and merge it back."""
 
-import sys
-from pathlib import Path
-
 import torch
 import torch.nn as nn
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
 from labs.lab01_attention_basics import scaled_dot_product_attention
 

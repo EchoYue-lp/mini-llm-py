@@ -1,15 +1,9 @@
 """Lab 05: train a decoder-only Transformer on a repeating token rule."""
 
 import argparse
-import sys
-from pathlib import Path
 
 import torch
 import torch.nn.functional as F
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
 from models.transformer_models import DecoderOnlyModel
 from utils.mask_utils import create_causal_mask

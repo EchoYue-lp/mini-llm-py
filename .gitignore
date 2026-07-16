@@ -4,6 +4,12 @@ __pycache__/
 *$py.class
 *.so
 .Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
 build/
 develop-eggs/
 dist/
@@ -40,6 +46,7 @@ venv/
 ENV/
 env/
 .venv
+.venv-mlx/
 
 # IDE
 .vscode/
@@ -59,6 +66,9 @@ runs/
 
 # 数据文件（用户应自行下载和处理）
 data/
+
+# 模型、adapter 和评测产物
+artifacts/
 
 # Trained SentencePiece tokenizer (should be trained locally)
 tokenization/sentencepiece_enzh.model

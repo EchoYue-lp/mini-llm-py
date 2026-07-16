@@ -1,0 +1,4 @@
+# Separate Apple Silicon environment for MLX fine-tuning.
+# Do not install this file into the PyTorch environment.
+mlx-lm==0.31.3
+huggingface-hub==1.23.0

@@ -1,14 +1,7 @@
 """Lab 03: a Pre-LN residual block and its gradient path."""
 
-import sys
-from pathlib import Path
-
 import torch
 import torch.nn as nn
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
 from models.layers import MultiHeadAttention, PositionwiseFeedForward
 from utils.mask_utils import create_causal_mask
