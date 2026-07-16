@@ -7,34 +7,46 @@ import sys
 import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-import torch
 import argparse
 from utils.checkpoint_utils import get_model_info, infer_model_config_from_checkpoint
 
 
-def resume_decoder_training(checkpoint_path, additional_epochs=10):
+def resume_decoder_training(
+    checkpoint_path,
+    additional_epochs=10,
+    data_dir="data/wikitext2",
+    tokenizer_path="tokenization/gpt2",
+    device=None,
+):
     """从 checkpoint 恢复 decoder-only 模型训练"""
-    print(f"从 {checkpoint_path} 恢复训练...")
-    checkpoint = torch.load(checkpoint_path)
+    from scripts.train_decoder import train_decoder_only
 
-    print(f"上次训练到 Epoch {checkpoint['epoch']}")
-    print(f"最佳验证损失: {checkpoint['val_loss']:.4f}")
+    return train_decoder_only(
+        data_dir=data_dir,
+        tokenizer_dir=tokenizer_path,
+        epochs=additional_epochs,
+        device=device,
+        resume_from=checkpoint_path,
+    )
 
-    # 这里可以继续训练，需要重新加载模型和优化器
-    print(f"\n将继续训练 {additional_epochs} 个 epoch")
-    print("注意: 需要在训练脚本中实现恢复训练功能")
 
-
-def resume_encoder_decoder_training(checkpoint_path, additional_epochs=10):
+def resume_encoder_decoder_training(
+    checkpoint_path,
+    additional_epochs=10,
+    data_dir="data/iwslt2017",
+    tokenizer_path="tokenization/sentencepiece_enzh.model",
+    device=None,
+):
     """从 checkpoint 恢复 encoder-decoder 模型训练"""
-    print(f"从 {checkpoint_path} 恢复训练...")
-    checkpoint = torch.load(checkpoint_path)
+    from scripts.train_encoder_decoder import train_encoder_decoder
 
-    print(f"上次训练到 Epoch {checkpoint['epoch']}")
-    print(f"最佳验证损失: {checkpoint['val_loss']:.4f}")
-
-    print(f"\n将继续训练 {additional_epochs} 个 epoch")
-    print("注意: 需要在训练脚本中实现恢复训练功能")
+    return train_encoder_decoder(
+        data_dir=data_dir,
+        tokenizer_path=tokenizer_path,
+        epochs=additional_epochs,
+        device=device,
+        resume_from=checkpoint_path,
+    )
 
 
 def show_checkpoint_info(checkpoint_path):
@@ -68,7 +80,7 @@ def show_checkpoint_info(checkpoint_path):
             print("模型类型: Decoder-Only")
             for key, value in config.items():
                 print(f"  {key}: {value}")
-    except:
+    except (KeyError, RuntimeError, ValueError):
         pass
 
     # 尝试 encoder-decoder
@@ -78,7 +90,7 @@ def show_checkpoint_info(checkpoint_path):
             print("模型类型: Encoder-Decoder")
             for key, value in config.items():
                 print(f"  {key}: {value}")
-    except:
+    except (KeyError, RuntimeError, ValueError):
         pass
 
     print(f"{'='*60}\n")
@@ -92,6 +104,9 @@ if __name__ == "__main__":
     parser.add_argument('--model_type', type=str, choices=['decoder', 'encoder_decoder'],
                         help='模型类型 (恢复训练时必需)')
     parser.add_argument('--epochs', type=int, default=10, help='继续训练的 epoch 数')
+    parser.add_argument('--data_dir', type=str, help='覆盖默认数据目录')
+    parser.add_argument('--tokenizer_path', type=str, help='覆盖默认 tokenizer 路径')
+    parser.add_argument('--device', type=str, choices=['cpu', 'cuda', 'mps'])
 
     args = parser.parse_args()
 
@@ -101,6 +116,20 @@ if __name__ == "__main__":
         if not args.model_type:
             print("错误: 恢复训练需要指定 --model_type")
         elif args.model_type == 'decoder':
-            resume_decoder_training(args.checkpoint, args.epochs)
+            kwargs = {}
+            if args.data_dir:
+                kwargs['data_dir'] = args.data_dir
+            if args.tokenizer_path:
+                kwargs['tokenizer_path'] = args.tokenizer_path
+            resume_decoder_training(
+                args.checkpoint, args.epochs, device=args.device, **kwargs
+            )
         else:
-            resume_encoder_decoder_training(args.checkpoint, args.epochs)
+            kwargs = {}
+            if args.data_dir:
+                kwargs['data_dir'] = args.data_dir
+            if args.tokenizer_path:
+                kwargs['tokenizer_path'] = args.tokenizer_path
+            resume_encoder_decoder_training(
+                args.checkpoint, args.epochs, device=args.device, **kwargs
+            )

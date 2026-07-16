@@ -125,8 +125,11 @@ results/
 
 - Decoder-Only 复用了含 cross-attention 的 `DecoderLayer`，有未使用参数，但不影响输出。
 - 训练结果依赖外部数据和较长训练，本次审查只验证小规模数值与代码路径。
-- `resume_training.py` 目前只展示 checkpoint 信息，没有真正恢复训练，应视为未完成功能。
 - 现有翻译质量示例和硬件性能数字不是自动基准，不能当作可复现实验结论。
+
+`resume_training.py` 已在合并后的后续提交中接入两个真实训练循环。恢复时会按 checkpoint
+配置重建模型，并加载权重、优化器、scheduler、epoch 和可用的 AMP Scaler 状态；词表不一致
+会直接报错。
 
 ## 7. 正确性审查：`llm-posttrain-lab`
 
@@ -165,24 +168,25 @@ smoke training。验证 loss 从 `0.9983` 降到 `0.9832`，峰值记录约 `1.8
 adapter 可以被 `tool_router.py` 重新加载并完成一条推理。两步训练不用于判断任务质量，
 但已覆盖变长 batch loss mask、梯度更新、验证、adapter 保存和重载链路。
 
-## 8. 推荐合并方式
+## 8. 直接迁移执行记录
 
-若要保留第二个仓库历史，可使用 `git subtree`，把它导入
-`posttraining/mlx_tool_router`。在执行前先创建备份分支，并确认两个仓库工作树干净。
+最终采用代码快照迁移：将 `llm-posttrain-lab` 当前已验证的代码直接放入
+`posttraining/mlx_tool_router`，但不把源仓库提交历史接入 `mini-llm-py` 主线。这样目录就是
+普通项目子目录，不需要专用同步命令、双向同步或两套发布流程。
 
-不建议复制粘贴后删除原仓库，因为会丢失历史关系。合并完成并验证一段时间后，再决定是否
-归档原 `llm-posttrain-lab`。
+后续改动只提交到 `mini-llm-py`。原 `llm-posttrain-lab` 不再维护或同步；是否删除其本地目录
+应单独处理，避免误删被 `.gitignore` 排除的模型、adapter 和实验结果。
 
 ## 9. 合并验收清单
 
-- 根 README 有统一学习路线。
-- 两套依赖分别安装，不互相强制。
-- PyTorch 单元测试通过。
-- 12 个 `labs/` 实验能从根目录运行。
-- MLX 数据校验通过。
-- MLX 1 至 5 step smoke training 能保存并重新加载 adapter。
-- base 与 adapter 至少完成 1 条固定样本推理。
-- 根 `.gitignore` 不允许模型、adapter、数据和环境进入 Git。
-- 文档中的命令均以各自子项目根目录为 cwd。
+- [x] 根 README 有统一学习路线。
+- [x] 两套依赖分别安装，不互相强制。
+- [x] PyTorch 单元测试通过。
+- [x] 12 个 `labs/` 实验能从根目录运行。
+- [x] MLX 数据校验通过。
+- [x] MLX 1 至 5 step smoke training 能保存并重新加载 adapter。
+- [x] base 与 adapter 至少完成 1 条固定样本推理。
+- [x] 根 `.gitignore` 不允许模型、adapter、数据和环境进入 Git。
+- [x] 文档中的命令均以各自子项目根目录为 cwd。
 
-达到这些条件后，合并会明显提升学习连贯性，而不会把两个框架硬揉成一个难维护的运行环境。
+以上验收项已经完成。合并提升了学习连贯性，同时仍以独立依赖环境隔离 PyTorch 与 MLX。

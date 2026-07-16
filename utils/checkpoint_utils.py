@@ -7,6 +7,45 @@ import torch
 from typing import Dict, Any, Tuple
 
 
+def get_checkpoint_config(
+    checkpoint_path: str,
+    model_type: str = 'decoder',
+    require_saved: bool = False,
+) -> Dict[str, Any]:
+    """Return the model config stored in a checkpoint.
+
+    Weight-only checkpoints cannot reliably reveal ``num_heads`` because head
+    count does not change the projection matrix shapes. Training resume
+    therefore requires an explicitly saved config, while inference utilities
+    may still fall back to best-effort shape inference.
+    """
+    checkpoint = torch.load(
+        checkpoint_path,
+        map_location='cpu',
+        weights_only=False,
+    )
+    if isinstance(checkpoint, dict) and isinstance(checkpoint.get('config'), dict):
+        return dict(checkpoint['config'])
+    if require_saved:
+        raise ValueError(
+            "Checkpoint 缺少 config，无法可靠恢复模型结构；"
+            "请使用训练脚本保存的完整 checkpoint。"
+        )
+    return infer_model_config_from_checkpoint(checkpoint_path, model_type)
+
+
+def get_checkpoint_training_config(checkpoint_path: str) -> Dict[str, Any]:
+    """Return optional training metadata used to reconstruct the scheduler."""
+    checkpoint = torch.load(
+        checkpoint_path,
+        map_location='cpu',
+        weights_only=False,
+    )
+    if isinstance(checkpoint, dict) and isinstance(checkpoint.get('training_config'), dict):
+        return dict(checkpoint['training_config'])
+    return {}
+
+
 def infer_model_config_from_checkpoint(checkpoint_path: str, model_type: str = 'decoder') -> Dict[str, Any]:
     """
     从 checkpoint 文件中推断模型配置
@@ -18,7 +57,11 @@ def infer_model_config_from_checkpoint(checkpoint_path: str, model_type: str = '
     Returns:
         包含模型配置的字典
     """
-    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+    checkpoint = torch.load(
+        checkpoint_path,
+        map_location='cpu',
+        weights_only=False,
+    )
 
     # 提取 state_dict
     if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
@@ -110,7 +153,11 @@ def load_model_from_checkpoint(
         (model, checkpoint_info) 元组
     """
     # 加载 checkpoint
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(
+        checkpoint_path,
+        map_location=device,
+        weights_only=False,
+    )
 
     # 提取 state_dict
     if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
@@ -197,6 +244,7 @@ def load_checkpoint_for_training(
     model,
     optimizer,
     scheduler=None,
+    scaler=None,
     device: str = 'cpu'
 ) -> Dict[str, Any]:
     """
@@ -207,20 +255,26 @@ def load_checkpoint_for_training(
         model: 模型实例
         optimizer: 优化器实例
         scheduler: 学习率调度器实例（可选）
+        scaler: AMP GradScaler 实例（可选）
         device: 设备
 
     Returns:
         包含训练信息的字典
     """
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(
+        checkpoint_path,
+        map_location=device,
+        weights_only=False,
+    )
 
     if not isinstance(checkpoint, dict):
         raise ValueError("Checkpoint 格式错误，应包含 dict")
 
     # 加载模型权重
-    if 'model_state_dict' in checkpoint:
-        model.load_state_dict(checkpoint['model_state_dict'])
-        print("✓ 模型权重已加载")
+    if 'model_state_dict' not in checkpoint:
+        raise ValueError("Checkpoint 缺少 model_state_dict，不能恢复训练")
+    model.load_state_dict(checkpoint['model_state_dict'])
+    print("✓ 模型权重已加载")
 
     # 加载优化器状态
     if 'optimizer_state_dict' in checkpoint:
@@ -231,6 +285,10 @@ def load_checkpoint_for_training(
     if scheduler is not None and 'scheduler_state_dict' in checkpoint:
         scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         print("✓ 调度器状态已加载")
+
+    if scaler is not None and 'scaler_state_dict' in checkpoint:
+        scaler.load_state_dict(checkpoint['scaler_state_dict'])
+        print("✓ AMP Scaler 状态已加载")
 
     # 返回训练信息
     training_info = {
@@ -255,7 +313,11 @@ def get_model_info(checkpoint_path: str) -> Dict[str, Any]:
     Returns:
         包含模型信息的字典
     """
-    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+    checkpoint = torch.load(
+        checkpoint_path,
+        map_location='cpu',
+        weights_only=False,
+    )
 
     info = {
         'file_path': checkpoint_path,

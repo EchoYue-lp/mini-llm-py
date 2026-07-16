@@ -1,0 +1,9 @@
+.venv/
+models/
+adapters/
+data/
+results/
+__pycache__/
+*.pyc
+.idea/
+.DS_Store

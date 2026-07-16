@@ -90,15 +90,44 @@ def train_decoder_only(
     use_scheduler=True,
     scheduler_type='cosine',
     max_grad_norm=1.0,
+    dropout=0.1,
     device=None,
-    log_root="runs"
+    log_root="runs",
+    resume_from=None,
 ):
     from torch.utils.tensorboard import SummaryWriter
+    from utils.checkpoint_utils import (
+        get_checkpoint_config,
+        get_checkpoint_training_config,
+        load_checkpoint_for_training,
+    )
 
     device = device or ("mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
+    resume_training_config = {}
+    if resume_from is not None:
+        resume_config = get_checkpoint_config(
+            resume_from,
+            model_type='decoder',
+            require_saved=True,
+        )
+        d_model = resume_config.get('d_model', d_model)
+        num_layers = resume_config.get('num_layers', num_layers)
+        num_heads = resume_config.get('num_heads', num_heads)
+        d_ff = resume_config.get('d_ff', d_ff)
+        max_len = resume_config.get('max_len', max_len)
+        dropout = resume_config.get('dropout', dropout)
+        resume_training_config = get_checkpoint_training_config(resume_from)
+        use_scheduler = resume_training_config.get('use_scheduler', use_scheduler)
+
     tokenizer = load_gpt2_tokenizer(tokenizer_dir)
     vocab_size = len(tokenizer)
     pad_token_id = tokenizer.pad_token_id
+    checkpoint_vocab_size = resume_config.get('vocab_size') if resume_from is not None else None
+    if checkpoint_vocab_size is not None and checkpoint_vocab_size != vocab_size:
+        raise ValueError(
+            f"Checkpoint 词表大小为 {checkpoint_vocab_size}，当前 tokenizer 为 {vocab_size}；"
+            "请使用训练该 checkpoint 时的 tokenizer。"
+        )
 
     train_data = load_dataset_pt(os.path.join(data_dir, "train_ids.pt"))
     val_data = load_dataset_pt(os.path.join(data_dir, "validation_ids.pt"))
@@ -124,20 +153,35 @@ def train_decoder_only(
         shuffle=False,
         collate_fn=lambda batch: collate_fn(batch, pad_token_id, max_len)
     )
-    model = DecoderOnlyModel(vocab_size, d_model, num_layers, num_heads, d_ff, max_len).to(device)
+    model = DecoderOnlyModel(
+        vocab_size=vocab_size,
+        d_model=d_model,
+        num_layers=num_layers,
+        num_heads=num_heads,
+        d_ff=d_ff,
+        max_len=max_len,
+        dropout=dropout,
+    ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     # 添加 ignore_index 以忽略 padding token 的损失
     criterion = nn.CrossEntropyLoss(ignore_index=pad_token_id)
 
     # 学习率调度器
     scheduler = None
+    num_training_steps = None
     if use_scheduler:
-        num_training_steps = len(train_loader) * epochs
+        scheduler_type = resume_training_config.get('scheduler_type', scheduler_type)
+        num_training_steps = resume_training_config.get(
+            'num_training_steps',
+            len(train_loader) * epochs,
+        )
+        num_warmup_steps = resume_training_config.get('num_warmup_steps')
         scheduler = WarmupLRScheduler(
             optimizer,
             scheduler_type=scheduler_type,
             num_training_steps=num_training_steps,
-            warmup_ratio=warmup_ratio
+            num_warmup_steps=num_warmup_steps,
+            warmup_ratio=warmup_ratio,
         )
         print(f"使用 {scheduler_type} 学习率调度器")
         print(f"Warmup 步数: {scheduler.num_warmup_steps}")
@@ -145,7 +189,19 @@ def train_decoder_only(
 
     # 保存最佳模型
     best_val_loss = float('inf')
+    start_epoch = 1
     best_model_path = "decoder_only_best.pt"
+
+    if resume_from is not None:
+        training_info = load_checkpoint_for_training(
+            resume_from,
+            model,
+            optimizer,
+            scheduler=scheduler,
+            device=device,
+        )
+        start_epoch = training_info['start_epoch']
+        best_val_loss = training_info['best_val_loss']
 
     # TensorBoard 日志
     log_dir = os.path.join(
@@ -156,7 +212,7 @@ def train_decoder_only(
     print(f"TensorBoard: {log_dir}")
 
     try:
-        for epoch in range(1, epochs+1):
+        for epoch in range(start_epoch, start_epoch + epochs):
             model.train()
             total_loss = 0
             for x, y in tqdm(train_loader, desc=f"Epoch {epoch} - Train"):
@@ -166,7 +222,7 @@ def train_decoder_only(
                 padding_mask = create_padding_mask(x, pad_token_id=pad_token_id)
                 mask = combine_masks(causal_mask, padding_mask)
                 logits, _ = model(x, mask=mask)
-                loss = criterion(logits.view(-1, vocab_size), y.view(-1))
+                loss = criterion(logits.reshape(-1, vocab_size), y.reshape(-1))
                 optimizer.zero_grad()
                 loss.backward()
 
@@ -199,7 +255,7 @@ def train_decoder_only(
                     padding_mask = create_padding_mask(x, pad_token_id=pad_token_id)
                     mask = combine_masks(causal_mask, padding_mask)
                     logits, _ = model(x, mask=mask)
-                    loss = criterion(logits.view(-1, vocab_size), y.view(-1))
+                    loss = criterion(logits.reshape(-1, vocab_size), y.reshape(-1))
                     val_loss += loss.item()
             avg_val_loss = val_loss / len(val_loader)
             print(f"Epoch {epoch} Val Loss: {avg_val_loss:.4f}")
@@ -226,8 +282,16 @@ def train_decoder_only(
                         'num_heads': num_heads,
                         'd_ff': d_ff,
                         'max_len': max_len,
-                        'dropout': 0.1,
-                    }
+                        'dropout': dropout,
+                    },
+                    'training_config': {
+                        'use_scheduler': use_scheduler,
+                        'scheduler_type': scheduler_type,
+                        'num_training_steps': num_training_steps,
+                        'num_warmup_steps': (
+                            scheduler.num_warmup_steps if scheduler is not None else None
+                        ),
+                    },
                 }
                 if scheduler is not None:
                     checkpoint['scheduler_state_dict'] = scheduler.state_dict()
@@ -255,8 +319,16 @@ def train_decoder_only(
                 'num_heads': num_heads,
                 'd_ff': d_ff,
                 'max_len': max_len,
-                'dropout': 0.1,
-            }
+                'dropout': dropout,
+            },
+            'training_config': {
+                'use_scheduler': use_scheduler,
+                'scheduler_type': scheduler_type,
+                'num_training_steps': num_training_steps,
+                'num_warmup_steps': (
+                    scheduler.num_warmup_steps if scheduler is not None else None
+                ),
+            },
         }
         if scheduler is not None:
             checkpoint['scheduler_state_dict'] = scheduler.state_dict()
@@ -281,8 +353,16 @@ def train_decoder_only(
                 'num_heads': num_heads,
                 'd_ff': d_ff,
                 'max_len': max_len,
-                'dropout': 0.1,
-            }
+                'dropout': dropout,
+            },
+            'training_config': {
+                'use_scheduler': use_scheduler,
+                'scheduler_type': scheduler_type,
+                'num_training_steps': num_training_steps,
+                'num_warmup_steps': (
+                    scheduler.num_warmup_steps if scheduler is not None else None
+                ),
+            },
         }
         if scheduler is not None:
             checkpoint['scheduler_state_dict'] = scheduler.state_dict()

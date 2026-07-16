@@ -4,11 +4,13 @@
 
 ## 📚 学习路线
 
-这个仓库现在分为三层：
+这个仓库现在分为四层：
 
 1. `labs/`：单概念、可直接运行的小实验。
 2. `models/`、`utils/`：从零实现的完整 Transformer 组件。
 3. `scripts/`：数据、训练、checkpoint 和生成闭环。
+4. `posttraining/mlx_tool_router/`：在 Apple Silicon 上学习 Qwen、LoRA、数据构造、
+   adapter 保存/重载与工具路由评测。
 
 建议先读 [文档索引](docs/README.md)，再按顺序运行 `labs/`。内容覆盖位置编码、
 Self-Attention、Multi-Head Attention、Decoder/CausalLM、KV Cache、LoRA、
@@ -17,8 +19,9 @@ FFN、next-token loss 和解码策略。
 
 - [Transformer 基础：从 token 到 logits](docs/transformer-fundamentals.md)
 - [现代 LLM 组件与 MoE](docs/modern-llm-and-moe.md)
-- [两个学习仓库的审查与合并建议](docs/repository-merge-review.md)
+- [两个学习仓库的审查与合并记录](docs/repository-merge-review.md)
 - [12 个 Transformer 小实验](labs/README.md)
+- [MLX LoRA 工具路由实验](posttraining/mlx_tool_router/README.md)
 
 ## 🌟 项目特点
 
@@ -62,10 +65,11 @@ pip install -r requirements.txt
 | 微型训练 `lab04-05` | 4 核 CPU、4 GB RAM | 8 核 CPU、8 GB RAM，或任意可用 CUDA/MPS GPU | 默认任务可在 CPU 上完成，用于验证 loss 下降和生成结果 |
 | 完整 Transformer 前向、推理和小 batch smoke training | 4 核 CPU、8 GB RAM；或 4 GB 显存/统一内存余量 | 8 GB 以上显存，或 16 GB Apple 统一内存 | 建议先用 `batch_size=4-16`、`max_len=32-64` 验证链路 |
 | 默认 IWSLT/WikiText 完整训练 | 6 GB 显存；或 16 GB Apple 统一内存；CPU 需 16 GB RAM 但很慢 | 8-12 GB CUDA 显存 + 16 GB RAM；或 24 GB Apple 统一内存 | 默认 `batch_size` 较大，长期训练优先 CUDA；4 GB GPU 需明显降低 batch/长度 |
+| MLX Qwen3-0.6B LoRA 子项目 | 已验证 M1 Pro、16 GB 统一内存 | 16-24 GB Apple 统一内存 | 2-step `batch_size=2` 实测峰值约 1.834 GB；8 GB 设备没有实机验证，因此不列为最低配置 |
 
 磁盘建议至少预留 `10 GB`，推荐 `20 GB`，用于 Python 环境、原始数据、tokenized 数据、
-checkpoint 和 TensorBoard 日志。若后续合并 Qwen/LoRA 后训练子项目，还需额外预留模型与
-adapter 空间。
+checkpoint 和 TensorBoard 日志。运行 MLX 子项目时还要额外预留约 1.4 GB 基座模型及多个
+adapter、评测结果的空间；更稳妥的总磁盘预算是 `15-20 GB`。
 
 ### 不同设备的注意事项
 
@@ -82,6 +86,15 @@ adapter 空间。
 
 `requirements.txt` 已包含 PyTorch；若云平台要求特定 CUDA wheel，请按平台说明先安装
 对应 PyTorch，再安装其余依赖。
+
+MLX 子项目有独立依赖，不应与根 PyTorch 环境强行混装：
+
+```bash
+cd posttraining/mlx_tool_router
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+```
 
 ## 🚀 快速开始
 
@@ -198,6 +211,34 @@ python -m scripts.generate
 
 ---
 
+### 从 checkpoint 恢复 PyTorch 训练
+
+训练脚本保存的完整 checkpoint 包含模型结构、权重、优化器、学习率调度器和当前 epoch；
+CUDA AMP 训练还会保存 GradScaler。继续训练 Decoder-Only：
+
+```bash
+python -m scripts.resume_training \
+  --checkpoint decoder_only_interrupted.pt \
+  --action resume \
+  --model_type decoder \
+  --epochs 10
+```
+
+继续训练 Encoder-Decoder：
+
+```bash
+python -m scripts.resume_training \
+  --checkpoint encoder_decoder_interrupted.pt \
+  --action resume \
+  --model_type encoder_decoder \
+  --epochs 5
+```
+
+`--epochs` 表示本次额外运行的 epoch 数。若数据或 tokenizer 不在默认位置，可传
+`--data_dir`、`--tokenizer_path`；训练恢复会校验 checkpoint 与 tokenizer 的词表大小。
+
+---
+
 ## 📊 训练监控
 
 启动 TensorBoard：
@@ -222,6 +263,7 @@ tensorboard --logdir=runs --port=6006
 ├── scripts/                     # 训练和推理脚本
 │   ├── train_encoder_decoder.py # 翻译模型训练
 │   ├── train_decoder.py         # 生成模型训练
+│   ├── resume_training.py       # 查看 checkpoint 或恢复训练
 │   ├── translate.py             # 翻译推理
 │   ├── generate.py              # 文本生成
 │   ├── train_sentencepiece.py  # 训练 SentencePiece
@@ -237,6 +279,8 @@ tensorboard --logdir=runs --port=6006
 │
 ├── labs/                        # 单概念可运行实验（Attention 到 MoE/LoRA）
 ├── docs/                        # Transformer、现代 LLM、合并审查文档
+├── posttraining/
+│   └── mlx_tool_router/         # MLX Qwen LoRA 与工具路由实验（独立环境）
 ├── data/                        # 数据目录
 │   ├── iwslt2017/              # 翻译数据集
 │   └── wikitext2/              # 生成数据集

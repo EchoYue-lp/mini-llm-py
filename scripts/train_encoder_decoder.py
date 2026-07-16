@@ -99,19 +99,55 @@ def train_encoder_decoder(
     use_scheduler=True,
     scheduler_type='cosine',
     max_grad_norm=1.0,
+    dropout=0.1,
     use_amp=True,
     gradient_checkpointing=False,
     device=None,
     demo_sentences=None,
-    log_root="runs"
+    log_root="runs",
+    resume_from=None,
 ):
     from torch.utils.tensorboard import SummaryWriter
     from utils.sentencepiece_tokenizer import SentencePieceTokenizer
+    from utils.checkpoint_utils import (
+        get_checkpoint_config,
+        get_checkpoint_training_config,
+        load_checkpoint_for_training,
+    )
 
     device = device or ("mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
+    resume_training_config = {}
+    if resume_from is not None:
+        resume_config = get_checkpoint_config(
+            resume_from,
+            model_type='encoder_decoder',
+            require_saved=True,
+        )
+        d_model = resume_config.get('d_model', d_model)
+        num_layers = resume_config.get('num_layers', num_layers)
+        num_heads = resume_config.get('num_heads', num_heads)
+        d_ff = resume_config.get('d_ff', d_ff)
+        max_len = resume_config.get('max_len', max_len)
+        dropout = resume_config.get('dropout', dropout)
+        resume_training_config = get_checkpoint_training_config(resume_from)
+        use_scheduler = resume_training_config.get('use_scheduler', use_scheduler)
+
     tokenizer = SentencePieceTokenizer.from_pretrained(tokenizer_path)
     src_vocab_size = tgt_vocab_size = tokenizer.vocab_size
     pad_token_id = tokenizer.pad_token_id
+    if resume_from is not None:
+        checkpoint_src_vocab = resume_config.get('src_vocab_size')
+        checkpoint_tgt_vocab = resume_config.get('tgt_vocab_size')
+        if checkpoint_src_vocab not in (None, src_vocab_size):
+            raise ValueError(
+                f"Checkpoint 源词表大小为 {checkpoint_src_vocab}，当前 tokenizer 为 "
+                f"{src_vocab_size}。"
+            )
+        if checkpoint_tgt_vocab not in (None, tgt_vocab_size):
+            raise ValueError(
+                f"Checkpoint 目标词表大小为 {checkpoint_tgt_vocab}，当前 tokenizer 为 "
+                f"{tgt_vocab_size}。"
+            )
 
     # 默认 demo 句子
     if demo_sentences is None:
@@ -157,7 +193,16 @@ def train_encoder_decoder(
             max_len
         )
     )
-    model = EncoderDecoderModel(src_vocab_size, tgt_vocab_size, d_model, num_layers, num_heads, d_ff, max_len).to(device)
+    model = EncoderDecoderModel(
+        src_vocab_size=src_vocab_size,
+        tgt_vocab_size=tgt_vocab_size,
+        d_model=d_model,
+        num_layers=num_layers,
+        num_heads=num_heads,
+        d_ff=d_ff,
+        max_len=max_len,
+        dropout=dropout,
+    ).to(device)
 
     # Gradient checkpointing (节省显存但会降低训练速度)
     if gradient_checkpointing:
@@ -182,19 +227,39 @@ def train_encoder_decoder(
 
     # 学习率调度器
     scheduler = None
+    num_training_steps = None
     if use_scheduler:
         updates_per_epoch = math.ceil(len(train_loader) / gradient_accumulation_steps)
-        num_training_steps = updates_per_epoch * epochs
+        scheduler_type = resume_training_config.get('scheduler_type', scheduler_type)
+        num_training_steps = resume_training_config.get(
+            'num_training_steps',
+            updates_per_epoch * epochs,
+        )
+        num_warmup_steps = resume_training_config.get('num_warmup_steps')
         scheduler = WarmupLRScheduler(
             optimizer,
             scheduler_type=scheduler_type,
             num_training_steps=num_training_steps,
-            warmup_ratio=warmup_ratio
+            num_warmup_steps=num_warmup_steps,
+            warmup_ratio=warmup_ratio,
         )
 
     # 保存最佳模型
     best_val_loss = float('inf')
+    start_epoch = 1
     best_model_path = "encoder_decoder_best.pt"
+
+    if resume_from is not None:
+        training_info = load_checkpoint_for_training(
+            resume_from,
+            model,
+            optimizer,
+            scheduler=scheduler,
+            scaler=scaler,
+            device=device,
+        )
+        start_epoch = training_info['start_epoch']
+        best_val_loss = training_info['best_val_loss']
 
     # TensorBoard 日志
     amp_suffix = "_amp" if use_amp else ""
@@ -206,7 +271,7 @@ def train_encoder_decoder(
     print(f"TensorBoard: {log_dir}")
 
     try:
-        for epoch in range(1, epochs+1):
+        for epoch in range(start_epoch, start_epoch + epochs):
             model.train()
             total_loss = 0
             optimizer.zero_grad()  # 在 epoch 开始时清零梯度
@@ -239,14 +304,14 @@ def train_encoder_decoder(
                 if use_amp and scaler is not None:
                     with torch.cuda.amp.autocast():
                         logits, _ = model(src, tgt_input, src_mask=src_mask, tgt_mask=tgt_mask, cross_mask=cross_mask)
-                        loss = criterion(logits.view(-1, tgt_vocab_size), tgt[:, 1:].reshape(-1))
+                        loss = criterion(logits.reshape(-1, tgt_vocab_size), tgt[:, 1:].reshape(-1))
                         # 梯度累积：缩放 loss
                         loss = loss / accumulation_divisor
 
                     scaler.scale(loss).backward()
                 else:
                     logits, _ = model(src, tgt_input, src_mask=src_mask, tgt_mask=tgt_mask, cross_mask=cross_mask)
-                    loss = criterion(logits.view(-1, tgt_vocab_size), tgt[:, 1:].reshape(-1))
+                    loss = criterion(logits.reshape(-1, tgt_vocab_size), tgt[:, 1:].reshape(-1))
                     # 梯度累积：缩放 loss
                     loss = loss / accumulation_divisor
                     loss.backward()
@@ -305,10 +370,10 @@ def train_encoder_decoder(
                     if use_amp and scaler is not None:
                         with torch.cuda.amp.autocast():
                             logits, _ = model(src, tgt_input, src_mask=src_mask, tgt_mask=tgt_mask, cross_mask=cross_mask)
-                            loss = criterion(logits.view(-1, tgt_vocab_size), tgt[:, 1:].reshape(-1))
+                            loss = criterion(logits.reshape(-1, tgt_vocab_size), tgt[:, 1:].reshape(-1))
                     else:
                         logits, _ = model(src, tgt_input, src_mask=src_mask, tgt_mask=tgt_mask, cross_mask=cross_mask)
-                        loss = criterion(logits.view(-1, tgt_vocab_size), tgt[:, 1:].reshape(-1))
+                        loss = criterion(logits.reshape(-1, tgt_vocab_size), tgt[:, 1:].reshape(-1))
 
                     val_loss += loss.item()
             avg_val_loss = val_loss / len(val_loader)
@@ -341,11 +406,21 @@ def train_encoder_decoder(
                         'num_heads': num_heads,
                         'd_ff': d_ff,
                         'max_len': max_len,
-                        'dropout': 0.1,
-                    }
+                        'dropout': dropout,
+                    },
+                    'training_config': {
+                        'use_scheduler': use_scheduler,
+                        'scheduler_type': scheduler_type,
+                        'num_training_steps': num_training_steps,
+                        'num_warmup_steps': (
+                            scheduler.num_warmup_steps if scheduler is not None else None
+                        ),
+                    },
                 }
                 if scheduler is not None:
                     checkpoint['scheduler_state_dict'] = scheduler.state_dict()
+                if scaler is not None:
+                    checkpoint['scaler_state_dict'] = scaler.state_dict()
                 torch.save(checkpoint, best_model_path)
                 print(f"✓ 保存最佳模型 (Val Loss: {avg_val_loss:.4f})")
 
@@ -354,15 +429,28 @@ def train_encoder_decoder(
 
     except KeyboardInterrupt:
         print("\n中断！已保存到 encoder_decoder_interrupted.pt")
-        torch.save({
+        checkpoint = {
             'epoch': epoch if 'epoch' in locals() else 0,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'val_loss': best_val_loss,
             'config': {'src_vocab_size': src_vocab_size, 'tgt_vocab_size': tgt_vocab_size,
                       'd_model': d_model, 'num_layers': num_layers, 'num_heads': num_heads,
-                      'd_ff': d_ff, 'max_len': max_len, 'dropout': 0.1}
-        }, "encoder_decoder_interrupted.pt")
+                      'd_ff': d_ff, 'max_len': max_len, 'dropout': dropout},
+            'training_config': {
+                'use_scheduler': use_scheduler,
+                'scheduler_type': scheduler_type,
+                'num_training_steps': num_training_steps,
+                'num_warmup_steps': (
+                    scheduler.num_warmup_steps if scheduler is not None else None
+                ),
+            },
+        }
+        if scheduler is not None:
+            checkpoint['scheduler_state_dict'] = scheduler.state_dict()
+        if scaler is not None:
+            checkpoint['scaler_state_dict'] = scaler.state_dict()
+        torch.save(checkpoint, "encoder_decoder_interrupted.pt")
         writer.close()
 
     except Exception as e:

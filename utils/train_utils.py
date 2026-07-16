@@ -32,7 +32,7 @@ def evaluate_lm(model, data_loader, criterion, vocab_size, device, pad_token_id=
             padding_mask = create_padding_mask(x, pad_token_id=pad_token_id)
             mask = combine_masks(causal_mask, padding_mask)
             logits, _ = model(x, mask=mask)
-            loss = criterion(logits.view(-1, vocab_size), y.view(-1))
+            loss = criterion(logits.reshape(-1, vocab_size), y.reshape(-1))
             # 只计算非 padding token 的数量
             num_tokens = (y != pad_token_id).sum().item()
             total_loss += loss.item() * num_tokens
@@ -75,7 +75,7 @@ def evaluate_mt(model, data_loader, criterion, tgt_vocab_size, device, pad_token
             tgt_mask = combine_masks(tgt_causal_mask, tgt_padding_mask)
             cross_mask = create_padding_mask(src, pad_token_id=pad_token_id)
             logits, _ = model(src, tgt_input, src_mask=src_mask, tgt_mask=tgt_mask, cross_mask=cross_mask)
-            loss = criterion(logits.view(-1, tgt_vocab_size), tgt[:, 1:].reshape(-1))
+            loss = criterion(logits.reshape(-1, tgt_vocab_size), tgt[:, 1:].reshape(-1))
             # 只计算非 padding token 的数量
             num_tokens = (tgt[:, 1:] != pad_token_id).sum().item()
             total_loss += loss.item() * num_tokens
