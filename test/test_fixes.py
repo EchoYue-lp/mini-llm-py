@@ -9,6 +9,7 @@ import torch
 import math
 from models.layers import PositionalEncoding
 from models.transformer_models import DecoderOnlyModel, EncoderDecoderModel
+from utils.generation_utils import top_p_candidates
 
 def test_positional_encoding():
     """测试位置编码（奇数和偶数维度）"""
@@ -71,30 +72,21 @@ def test_top_p_sampling_logic():
     probs = torch.tensor([0.5, 0.3, 0.15, 0.04, 0.01])
     p = 0.9
 
-    sorted_probs, sorted_indices = torch.sort(probs, descending=True)
-    cumulative_probs = torch.cumsum(sorted_probs, dim=0)
-
-    # 找到累积概率刚好超过 p 的位置
-    cutoff_idx = (cumulative_probs <= p).sum().item()
-    cutoff_idx = max(1, cutoff_idx)
-
-    selected_probs = sorted_probs[:cutoff_idx]
-    selected_indices = sorted_indices[:cutoff_idx]
+    selected_probs, selected_indices = top_p_candidates(probs, p)
 
     print(f"  原始概率: {probs.tolist()}")
-    print(f"  累积概率: {cumulative_probs.tolist()}")
     print(f"  Top-p={p} 选中索引: {selected_indices.tolist()}")
     print(f"  Top-p={p} 选中概率: {selected_probs.tolist()}")
 
-    assert cutoff_idx >= 1, "至少应该保留一个 token"
-    assert selected_probs.sum() <= 1.0, f"选中概率和超过 1.0: {selected_probs.sum()}"
+    assert selected_indices.tolist() == [0, 1, 2], "应包含第一个使累计概率越过 p 的 token"
+    assert torch.allclose(selected_probs.sum(), torch.tensor(1.0))
     print("  ✓ Top-P 采样逻辑正确")
 
     # 测试边界情况：p 很小
     p_small = 0.1
-    cutoff_idx_small = max(1, (cumulative_probs <= p_small).sum().item())
-    assert cutoff_idx_small >= 1, "p 很小时也应至少保留一个 token"
-    print(f"  ✓ 边界情况 (p={p_small}) 处理正确，保留 {cutoff_idx_small} 个 token")
+    _, selected_indices_small = top_p_candidates(probs, p_small)
+    assert len(selected_indices_small) == 1, "p 很小时也应至少保留一个 token"
+    print(f"  ✓ 边界情况 (p={p_small}) 处理正确，保留 1 个 token")
 
     print("✅ Top-P 采样逻辑测试全部通过\n")
 

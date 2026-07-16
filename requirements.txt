@@ -1,5 +1,5 @@
-# PyTorch (如果云平台未预装，取消注释)
-# torch>=2.0.0
+# PyTorch（项目核心依赖）
+torch>=2.0.0
 
 # Transformers 库 (GPT-2 tokenizer)
 transformers>=4.30.0
@@ -21,3 +21,6 @@ datasets>=2.10.0
 
 # 可视化 (可选)
 matplotlib>=3.7.0
+
+# 测试
+pytest>=8.0.0

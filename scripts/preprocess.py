@@ -1,20 +1,23 @@
 import os
-import json
-from transformers import GPT2TokenizerFast
+import argparse
 from tqdm import tqdm
 import torch
+
+from utils.tokenizer_utils import load_gpt2_tokenizer
 
 def preprocess_text_file(text_file, tokenizer, out_file, seq_len=96, min_length=10):
     # 读取所有文本
     with open(text_file, 'r', encoding='utf-8') as f:
         lines = [line.strip() for line in f if line.strip()]
-    # 拼接成一个长文本
-    full_text = '\n'.join(lines)
-    # 分词并转为 id
-    input_ids = tokenizer.encode(full_text, add_special_tokens=False)
+    # 在文档/段落边界插入 EOS，让生成模型真正学习停止信号。
+    input_ids = []
+    for line in lines:
+        input_ids.extend(tokenizer.encode(line, add_special_tokens=False))
+        if tokenizer.eos_token_id is not None:
+            input_ids.append(tokenizer.eos_token_id)
     # 按 seq_len 切分
     chunks = []
-    for i in range(0, len(input_ids) - seq_len, seq_len):
+    for i in range(0, len(input_ids), seq_len):
         chunk = input_ids[i:i+seq_len]
         if len(chunk) >= min_length:
             chunks.append(chunk)
@@ -24,7 +27,8 @@ def preprocess_text_file(text_file, tokenizer, out_file, seq_len=96, min_length=
 
 def preprocess_wikitext2(data_dir="data/wikitext2", tokenizer_dir="tokenization/gpt2", seq_len=96):
     # 设置 model_max_length 避免 tokenizer 警告
-    tokenizer = GPT2TokenizerFast.from_pretrained(tokenizer_dir, model_max_length=1e30)
+    tokenizer = load_gpt2_tokenizer(tokenizer_dir)
+    tokenizer.model_max_length = int(1e30)
     for split in ["train", "validation", "test"]:
         text_file = os.path.join(data_dir, f"{split}.txt")
         out_file = os.path.join(data_dir, f"{split}_ids.pt")
@@ -76,7 +80,8 @@ def preprocess_parallel_corpus(src_file, tgt_file, tokenizer, src_out, tgt_out, 
 
 def preprocess_opus100_en_zh(data_dir="data/iwslt2017", tokenizer_dir="tokenization/gpt2", seq_len=96):
     # 设置 model_max_length 避免 tokenizer 警告
-    tokenizer = GPT2TokenizerFast.from_pretrained(tokenizer_dir, model_max_length=1e30)
+    tokenizer = load_gpt2_tokenizer(tokenizer_dir)
+    tokenizer.model_max_length = int(1e30)
     for split in ["train", "validation", "test"]:
         src_file = os.path.join(data_dir, f"{split}.en.txt")
         tgt_file = os.path.join(data_dir, f"{split}.zh.txt")
@@ -85,6 +90,21 @@ def preprocess_opus100_en_zh(data_dir="data/iwslt2017", tokenizer_dir="tokenizat
         print(f"\n处理 {split} 集...")
         preprocess_parallel_corpus(src_file, tgt_file, tokenizer, src_out, tgt_out, max_len=seq_len)
 
+def main():
+    parser = argparse.ArgumentParser(description="预处理生成或旧版 GPT-2 翻译数据")
+    parser.add_argument("--generation", action="store_true")
+    parser.add_argument("--legacy-translation", action="store_true")
+    parser.add_argument("--all", action="store_true")
+    args = parser.parse_args()
+
+    if not (args.generation or args.legacy_translation or args.all):
+        parser.print_help()
+        return
+    if args.generation or args.all:
+        preprocess_wikitext2()
+    if args.legacy_translation or args.all:
+        preprocess_opus100_en_zh()
+
+
 if __name__ == "__main__":
-    preprocess_wikitext2()
-    preprocess_opus100_en_zh()
+    main()

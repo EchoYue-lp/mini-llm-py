@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch
 from models.transformer_models import EncoderDecoderModel
 from utils.translation_utils import beam_search_translate
-from transformers import GPT2TokenizerFast
+from utils.tokenizer_utils import load_gpt2_tokenizer
 
 
 def test_embedding_scaling_consistency():
@@ -29,7 +29,7 @@ def test_embedding_scaling_consistency():
     model.eval()
 
     # 创建 tokenizer
-    tokenizer = GPT2TokenizerFast.from_pretrained("tokenization/gpt2")
+    tokenizer = load_gpt2_tokenizer("tokenization/gpt2")
 
     # 测试输入
     src = torch.randint(0, 1000, (1, 10))
@@ -92,17 +92,16 @@ def test_beam_search_with_scaling():
     print("=" * 60)
 
     # 创建模型
+    tokenizer = load_gpt2_tokenizer("tokenization/gpt2")
+    vocab_size = len(tokenizer)
     model = EncoderDecoderModel(
-        src_vocab_size=1000,
-        tgt_vocab_size=1000,
+        src_vocab_size=vocab_size,
+        tgt_vocab_size=vocab_size,
         d_model=128,
         num_layers=2,
         num_heads=4
     )
     model.eval()
-
-    # 创建 tokenizer
-    tokenizer = GPT2TokenizerFast.from_pretrained("tokenization/gpt2")
 
     # 测试输入
     src_ids = [10, 20, 30, 40, 50]

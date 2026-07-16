@@ -2,8 +2,7 @@ import torch
 from models.transformer_models import DecoderOnlyModel
 from utils.mask_utils import create_causal_mask
 from utils.checkpoint_utils import load_model_from_checkpoint
-from transformers import GPT2TokenizerFast
-import os
+from utils.tokenizer_utils import load_gpt2_tokenizer
 
 def greedy_generate(model, input_ids, tokenizer, max_len=50, device="cpu"):
     model.eval()
@@ -30,8 +29,7 @@ def main():
     model_path = "decoder_only_best.pt"  # 使用最佳模型
     tokenizer_dir = "tokenization/gpt2"
     device = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
-    tokenizer = GPT2TokenizerFast.from_pretrained(tokenizer_dir)
-    vocab_size = tokenizer.vocab_size
+    tokenizer = load_gpt2_tokenizer(tokenizer_dir)
 
     print(f"正在从 {model_path} 加载模型...")
     print(f"使用设备: {device}\n")
@@ -47,8 +45,6 @@ def main():
     # 如果 checkpoint 中没有保存配置，使用默认值
     if not checkpoint_info:
         print("警告：使用默认配置，如果训练时修改了配置，生成结果可能不正确")
-
-    checkpoint = torch.load(model_path, map_location=device)
 
     print("\n请输入 prompt，回车生成，输入 exit 退出：")
     while True:

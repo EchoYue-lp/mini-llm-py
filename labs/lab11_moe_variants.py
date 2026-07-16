@@ -1,0 +1,148 @@
+"""Lab 11: dense MoE, sparse MoE, and shared-expert sparse MoE."""
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+class Expert(nn.Module):
+    def __init__(self, d_model=16, hidden_dim=32):
+        super().__init__()
+        self.up = nn.Linear(d_model, hidden_dim)
+        self.down = nn.Linear(hidden_dim, d_model)
+
+    def forward(self, x):
+        return self.down(F.gelu(self.up(x)))
+
+
+class DenseMoE(nn.Module):
+    """Evaluate every expert and combine all outputs with router probabilities."""
+
+    def __init__(self, d_model=16, hidden_dim=32, num_experts=4):
+        super().__init__()
+        self.router = nn.Linear(d_model, num_experts, bias=False)
+        self.experts = nn.ModuleList(
+            [Expert(d_model, hidden_dim) for _ in range(num_experts)]
+        )
+
+    def forward(self, x):
+        weights = torch.softmax(self.router(x), dim=-1)
+        expert_outputs = torch.stack([expert(x) for expert in self.experts], dim=-2)
+        return (expert_outputs * weights.unsqueeze(-1)).sum(dim=-2), weights
+
+
+class SparseMoE(nn.Module):
+    """Evaluate only the routed Top-k experts for each token."""
+
+    def __init__(
+        self,
+        d_model=16,
+        hidden_dim=32,
+        num_experts=8,
+        top_k=2,
+        renormalize_topk=True,
+    ):
+        super().__init__()
+        if not 1 <= top_k <= num_experts:
+            raise ValueError("top_k must be between 1 and num_experts")
+        self.num_experts = num_experts
+        self.top_k = top_k
+        self.renormalize_topk = renormalize_topk
+        self.router = nn.Linear(d_model, num_experts, bias=False)
+        self.experts = nn.ModuleList(
+            [Expert(d_model, hidden_dim) for _ in range(num_experts)]
+        )
+
+    def forward(self, x):
+        shape = x.shape
+        tokens = x.reshape(-1, x.size(-1))
+        probabilities = torch.softmax(self.router(tokens), dim=-1)
+        top_weights, top_indices = probabilities.topk(self.top_k, dim=-1)
+        if self.renormalize_topk:
+            top_weights = top_weights / top_weights.sum(dim=-1, keepdim=True)
+
+        output = torch.zeros_like(tokens)
+        counts = []
+        for expert_id, expert in enumerate(self.experts):
+            token_indices, choice_indices = torch.where(top_indices == expert_id)
+            counts.append(int(token_indices.numel()))
+            if token_indices.numel() == 0:
+                continue
+            selected = expert(tokens[token_indices])
+            selected = selected * top_weights[
+                token_indices, choice_indices
+            ].unsqueeze(-1)
+            output.index_add_(0, token_indices, selected)
+
+        importance = probabilities.mean(dim=0)
+        load = F.one_hot(
+            top_indices[:, 0], num_classes=self.num_experts
+        ).float().mean(dim=0)
+        balance_loss = self.num_experts * (importance * load).sum()
+        return output.view(shape), top_indices.view(*shape[:-1], self.top_k), counts, balance_loss
+
+
+class SharedExpertSparseMoE(nn.Module):
+    """Always-on shared experts plus Top-k routed experts.
+
+    This is a small teaching implementation of shared-expert isolation.  A
+    Transformer block would add the residual connection outside this module.
+    """
+
+    def __init__(
+        self,
+        d_model=16,
+        hidden_dim=32,
+        num_shared_experts=1,
+        num_routed_experts=8,
+        top_k=2,
+    ):
+        super().__init__()
+        self.shared_experts = nn.ModuleList(
+            [Expert(d_model, hidden_dim) for _ in range(num_shared_experts)]
+        )
+        self.routed = SparseMoE(
+            d_model=d_model,
+            hidden_dim=hidden_dim,
+            num_experts=num_routed_experts,
+            top_k=top_k,
+            renormalize_topk=False,
+        )
+
+    def forward(self, x):
+        shared_output = sum(expert(x) for expert in self.shared_experts)
+        routed_output, routes, counts, balance_loss = self.routed(x)
+        return shared_output + routed_output, routes, counts, balance_loss
+
+
+def run_demo():
+    torch.manual_seed(0)
+    x = torch.randn(2, 5, 16)
+
+    dense_output, dense_weights = DenseMoE(num_experts=4)(x)
+    sparse_output, routes, counts, balance_loss = SparseMoE(
+        num_experts=8, top_k=2
+    )(x)
+    shared_output, shared_routes, shared_counts, shared_balance = (
+        SharedExpertSparseMoE(
+            num_shared_experts=1,
+            num_routed_experts=8,
+            top_k=2,
+        )(x)
+    )
+
+    assert dense_output.shape == sparse_output.shape == shared_output.shape == x.shape
+    assert dense_weights.shape == (2, 5, 4)
+    assert routes.shape == shared_routes.shape == (2, 5, 2)
+    assert sum(counts) == sum(shared_counts) == 2 * 5 * 2
+
+    print("Dense MoE: all 4 experts run for every token")
+    print("Sparse MoE routed counts:", counts)
+    print("Sparse balance loss:", balance_loss.item())
+    print("Shared-expert Sparse MoE routed counts:", shared_counts)
+    print("Shared expert count: 1, always active for all tokens")
+    print("Shared variant balance loss:", shared_balance.item())
+
+
+if __name__ == "__main__":
+    run_demo()

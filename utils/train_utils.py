@@ -1,6 +1,10 @@
 import torch
 import math
-from .mask_utils import create_causal_mask, create_padding_mask
+from .mask_utils import (
+    combine_masks,
+    create_causal_mask,
+    create_padding_mask,
+)
 
 def compute_perplexity(loss):
     return math.exp(loss)
@@ -24,7 +28,9 @@ def evaluate_lm(model, data_loader, criterion, vocab_size, device, pad_token_id=
         for x, y in data_loader:
             x, y = x.to(device), y.to(device)
             # 为 decoder-only 模型创建 causal mask
-            mask = create_causal_mask(x.size(1), device=device)
+            causal_mask = create_causal_mask(x.size(1), device=device)
+            padding_mask = create_padding_mask(x, pad_token_id=pad_token_id)
+            mask = combine_masks(causal_mask, padding_mask)
             logits, _ = model(x, mask=mask)
             loss = criterion(logits.view(-1, vocab_size), y.view(-1))
             # 只计算非 padding token 的数量
@@ -60,10 +66,15 @@ def evaluate_mt(model, data_loader, criterion, tgt_vocab_size, device, pad_token
         for src, tgt in data_loader:
             src, tgt = src.to(device), tgt.to(device)
             # 为 encoder-decoder 模型创建必要的 masks
-            src_mask = create_padding_mask(src)
-            tgt_mask = create_causal_mask(tgt[:, :-1].size(1), device=device)
-            cross_mask = create_padding_mask(src)
-            logits, _ = model(src, tgt[:, :-1], src_mask=src_mask, tgt_mask=tgt_mask, cross_mask=cross_mask)
+            src_mask = create_padding_mask(src, pad_token_id=pad_token_id)
+            tgt_input = tgt[:, :-1]
+            tgt_causal_mask = create_causal_mask(tgt_input.size(1), device=device)
+            tgt_padding_mask = create_padding_mask(
+                tgt_input, pad_token_id=pad_token_id
+            )
+            tgt_mask = combine_masks(tgt_causal_mask, tgt_padding_mask)
+            cross_mask = create_padding_mask(src, pad_token_id=pad_token_id)
+            logits, _ = model(src, tgt_input, src_mask=src_mask, tgt_mask=tgt_mask, cross_mask=cross_mask)
             loss = criterion(logits.view(-1, tgt_vocab_size), tgt[:, 1:].reshape(-1))
             # 只计算非 padding token 的数量
             num_tokens = (tgt[:, 1:] != pad_token_id).sum().item()

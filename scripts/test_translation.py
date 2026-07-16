@@ -5,7 +5,8 @@
 
 import torch
 from models.transformer_models import EncoderDecoderModel
-from transformers import GPT2TokenizerFast
+from utils.checkpoint_utils import load_model_from_checkpoint
+from utils.sentencepiece_tokenizer import SentencePieceTokenizer
 from utils.translation_utils import (
     beam_search_translate,
     greedy_translate,
@@ -57,35 +58,27 @@ def test_all_methods(model, tokenizer, test_sentences, device="cpu"):
 
 def main():
     model_path = "encoder_decoder_best.pt"
-    tokenizer_dir = "tokenization/gpt2"
+    tokenizer_path = "tokenization/sentencepiece_enzh.model"
     device = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
 
     print(f"Loading model from {model_path}...")
     print(f"Device: {device}\n")
 
-    tokenizer = GPT2TokenizerFast.from_pretrained(tokenizer_dir)
-    src_vocab_size = tgt_vocab_size = tokenizer.vocab_size
-
-    # 加载模型
-    checkpoint = torch.load(model_path, map_location=device)
-    state_dict = checkpoint['model_state_dict'] if isinstance(checkpoint, dict) else checkpoint
-    max_len = state_dict['src_pos_enc.pe'].shape[0] if 'src_pos_enc.pe' in state_dict else 128
-
-    model = EncoderDecoderModel(
-        src_vocab_size=src_vocab_size,
-        tgt_vocab_size=tgt_vocab_size,
-        d_model=256,
-        num_layers=4,
-        num_heads=4,
-        d_ff=1024,
-        max_len=max_len
+    tokenizer = SentencePieceTokenizer.from_pretrained(tokenizer_path)
+    model, checkpoint_info = load_model_from_checkpoint(
+        model_path,
+        EncoderDecoderModel,
+        model_type="encoder_decoder",
+        device=device,
     )
-    model.load_state_dict(state_dict)
-    model = model.to(device)
     model.eval()
 
-    if isinstance(checkpoint, dict) and 'epoch' in checkpoint:
-        print(f"✓ Model loaded (Epoch {checkpoint['epoch']}, Val Loss: {checkpoint['val_loss']:.4f})\n")
+    if checkpoint_info.get("epoch") is not None:
+        print(
+            "✓ Model loaded "
+            f"(Epoch {checkpoint_info['epoch']}, "
+            f"Val Loss: {checkpoint_info['val_loss']:.4f})\n"
+        )
 
     # 测试句子
     test_sentences = [

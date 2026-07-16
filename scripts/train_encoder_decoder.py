@@ -1,4 +1,5 @@
 import os
+import math
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -6,9 +7,7 @@ from utils.mask_utils import collate_fn_mt, create_padding_mask, create_causal_m
 from utils.scheduler_utils import WarmupLRScheduler
 from utils.translation_utils import beam_search_translate
 from models.transformer_models import EncoderDecoderModel
-from utils.sentencepiece_tokenizer import SentencePieceTokenizer
 from tqdm import tqdm
-from torch.utils.tensorboard import SummaryWriter
 
 def load_dataset_pt(pt_file):
     # 使用 weights_only=False 加载数据（数据来源可信）
@@ -103,8 +102,12 @@ def train_encoder_decoder(
     use_amp=True,
     gradient_checkpointing=False,
     device=None,
-    demo_sentences=None
+    demo_sentences=None,
+    log_root="runs"
 ):
+    from torch.utils.tensorboard import SummaryWriter
+    from utils.sentencepiece_tokenizer import SentencePieceTokenizer
+
     device = device or ("mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
     tokenizer = SentencePieceTokenizer.from_pretrained(tokenizer_path)
     src_vocab_size = tgt_vocab_size = tokenizer.vocab_size
@@ -180,7 +183,8 @@ def train_encoder_decoder(
     # 学习率调度器
     scheduler = None
     if use_scheduler:
-        num_training_steps = len(train_loader) * epochs
+        updates_per_epoch = math.ceil(len(train_loader) / gradient_accumulation_steps)
+        num_training_steps = updates_per_epoch * epochs
         scheduler = WarmupLRScheduler(
             optimizer,
             scheduler_type=scheduler_type,
@@ -194,7 +198,10 @@ def train_encoder_decoder(
 
     # TensorBoard 日志
     amp_suffix = "_amp" if use_amp else ""
-    log_dir = f'/hy-tmp/Net/logs/enc_dec_{d_model}d_{num_layers}L_{num_heads}H_bs{batch_size}x{gradient_accumulation_steps}{amp_suffix}'
+    log_dir = os.path.join(
+        log_root,
+        f'enc_dec_{d_model}d_{num_layers}L_{num_heads}H_bs{batch_size}x{gradient_accumulation_steps}{amp_suffix}',
+    )
     writer = SummaryWriter(log_dir=log_dir)
     print(f"TensorBoard: {log_dir}")
 
@@ -206,6 +213,18 @@ def train_encoder_decoder(
 
             for batch_idx, (src, tgt) in enumerate(tqdm(train_loader, desc=f"Epoch {epoch} - Train")):
                 src, tgt = src.to(device), tgt.to(device)
+                batches_in_last_group = len(train_loader) % gradient_accumulation_steps
+                is_last_group = (
+                    batches_in_last_group > 0
+                    and batch_idx >= len(train_loader) - batches_in_last_group
+                )
+                accumulation_divisor = (
+                    batches_in_last_group if is_last_group else gradient_accumulation_steps
+                )
+                should_update = (
+                    (batch_idx + 1) % gradient_accumulation_steps == 0
+                    or batch_idx + 1 == len(train_loader)
+                )
                 # tgt: [B, L]，输入为[:-1]，目标为[1:]
                 tgt_input = tgt[:, :-1]
 
@@ -222,21 +241,21 @@ def train_encoder_decoder(
                         logits, _ = model(src, tgt_input, src_mask=src_mask, tgt_mask=tgt_mask, cross_mask=cross_mask)
                         loss = criterion(logits.view(-1, tgt_vocab_size), tgt[:, 1:].reshape(-1))
                         # 梯度累积：缩放 loss
-                        loss = loss / gradient_accumulation_steps
+                        loss = loss / accumulation_divisor
 
                     scaler.scale(loss).backward()
                 else:
                     logits, _ = model(src, tgt_input, src_mask=src_mask, tgt_mask=tgt_mask, cross_mask=cross_mask)
                     loss = criterion(logits.view(-1, tgt_vocab_size), tgt[:, 1:].reshape(-1))
                     # 梯度累积：缩放 loss
-                    loss = loss / gradient_accumulation_steps
+                    loss = loss / accumulation_divisor
                     loss.backward()
 
                 # 累积真实 loss（不缩放）用于日志记录
-                total_loss += loss.item() * gradient_accumulation_steps
+                total_loss += loss.item() * accumulation_divisor
 
                 # 每 gradient_accumulation_steps 步更新一次参数
-                if (batch_idx + 1) % gradient_accumulation_steps == 0:
+                if should_update:
                     # 梯度裁剪
                     if max_grad_norm > 0:
                         if use_amp and scaler is not None:
@@ -259,25 +278,6 @@ def train_encoder_decoder(
                     # 更新学习率（每次参数更新后）
                     if scheduler is not None:
                         scheduler.step()
-
-            # 处理最后一个不完整的累积批次
-            if len(train_loader) % gradient_accumulation_steps != 0:
-                if max_grad_norm > 0:
-                    if use_amp and scaler is not None:
-                        scaler.unscale_(optimizer)
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-                        scaler.step(optimizer)
-                        scaler.update()
-                    else:
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-                        optimizer.step()
-                else:
-                    if use_amp and scaler is not None:
-                        scaler.step(optimizer)
-                        scaler.update()
-                    else:
-                        optimizer.step()
-                optimizer.zero_grad()
 
             avg_loss = total_loss / len(train_loader)
             current_lr = optimizer.param_groups[0]['lr']

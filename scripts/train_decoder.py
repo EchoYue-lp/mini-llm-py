@@ -5,9 +5,8 @@ from torch.utils.data import DataLoader
 from models.transformer_models import DecoderOnlyModel
 from utils.mask_utils import create_causal_mask, create_padding_mask, combine_masks
 from utils.scheduler_utils import WarmupLRScheduler
-from transformers import GPT2TokenizerFast
 from tqdm import tqdm
-from torch.utils.tensorboard import SummaryWriter
+from utils.tokenizer_utils import load_gpt2_tokenizer
 
 def load_dataset_pt(pt_file):
     # 使用 weights_only=False 加载数据（数据来源可信）
@@ -91,12 +90,15 @@ def train_decoder_only(
     use_scheduler=True,
     scheduler_type='cosine',
     max_grad_norm=1.0,
-    device=None
+    device=None,
+    log_root="runs"
 ):
+    from torch.utils.tensorboard import SummaryWriter
+
     device = device or ("mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
-    tokenizer = GPT2TokenizerFast.from_pretrained(tokenizer_dir)
-    vocab_size = tokenizer.vocab_size
-    pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+    tokenizer = load_gpt2_tokenizer(tokenizer_dir)
+    vocab_size = len(tokenizer)
+    pad_token_id = tokenizer.pad_token_id
 
     train_data = load_dataset_pt(os.path.join(data_dir, "train_ids.pt"))
     val_data = load_dataset_pt(os.path.join(data_dir, "validation_ids.pt"))
@@ -146,7 +148,10 @@ def train_decoder_only(
     best_model_path = "decoder_only_best.pt"
 
     # TensorBoard 日志
-    log_dir = f'/hy-tmp/Net/logs/decoder_{d_model}d_{num_layers}L_{num_heads}H_bs{batch_size}'
+    log_dir = os.path.join(
+        log_root,
+        f'decoder_{d_model}d_{num_layers}L_{num_heads}H_bs{batch_size}',
+    )
     writer = SummaryWriter(log_dir=log_dir)
     print(f"TensorBoard: {log_dir}")
 

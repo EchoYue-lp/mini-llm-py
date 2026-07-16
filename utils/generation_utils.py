@@ -1,7 +1,24 @@
 import torch
 import torch.nn.functional as F
-import random
 from .mask_utils import create_causal_mask, create_padding_mask, combine_masks
+
+
+def top_p_candidates(probs, p):
+    """Return normalized nucleus candidates, including the crossing token."""
+
+    if not 0 < p <= 1:
+        raise ValueError("p must be in (0, 1]")
+
+    sorted_probs, sorted_indices = torch.sort(probs, descending=True)
+    cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+    remove = cumulative_probs > p
+    remove[1:] = remove[:-1].clone()
+    remove[0] = False
+
+    kept_probs = sorted_probs[~remove]
+    kept_indices = sorted_indices[~remove]
+    kept_probs = kept_probs / kept_probs.sum()
+    return kept_probs, kept_indices
 
 def beam_search_generate(model, input_ids, tokenizer, beam_width=3, max_len=50, device="cpu", length_penalty=0.6):
     """
@@ -145,21 +162,9 @@ def top_p_sampling(model, input_ids, tokenizer, p=0.9, max_len=50, device="cpu",
             logits, _ = model(input_ids, mask=mask)
         logits = logits[:, -1, :] / temperature
         probs = F.softmax(logits, dim=-1).squeeze(0)
-        sorted_probs, sorted_indices = torch.sort(probs, descending=True)
-        cumulative_probs = torch.cumsum(sorted_probs, dim=0)
+        sorted_probs, sorted_indices = top_p_candidates(probs, p)
 
-        # 找到累积概率刚好超过 p 的位置
-        # 保留累积概率 <= p 的所有 tokens，加上第一个超过 p 的 token
-        cutoff_idx = (cumulative_probs <= p).sum().item()
-        # 至少保留第一个 token（概率最高的）
-        cutoff_idx = max(1, cutoff_idx)
-
-        # 截取 top-p tokens
-        sorted_probs = sorted_probs[:cutoff_idx]
-        sorted_indices = sorted_indices[:cutoff_idx]
-
-        # 重新归一化概率并采样
-        sorted_probs = sorted_probs / sorted_probs.sum()
+        # 从 nucleus 集合中采样
         next_token_idx = torch.multinomial(sorted_probs, num_samples=1)
         next_token = sorted_indices[next_token_idx].item()
         input_ids = torch.cat([input_ids, torch.tensor([[next_token]], device=device)], dim=1)
