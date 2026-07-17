@@ -65,6 +65,10 @@ class GroupedQuerySelfAttention(nn.Module):
         return 2 * self.num_kv_heads * self.head_dim
 
 
+def parameter_count(module):
+    return sum(parameter.numel() for parameter in module.parameters())
+
+
 def run_demo():
     torch.manual_seed(0)
     x = torch.randn(2, 6, 32)
@@ -74,16 +78,27 @@ def run_demo():
         "MQA": GroupedQuerySelfAttention(32, 8, 1),
     }
 
+    parameter_counts = {}
+    cache_sizes = {}
     for name, attention in variants.items():
         output, cache, weights = attention(x)
         assert output.shape == x.shape
         assert cache[0].shape == (2, attention.num_kv_heads, 6, 4)
+        expanded_key = attention._expand_kv(cache[0])
+        parameter_counts[name] = parameter_count(attention)
+        cache_sizes[name] = attention.kv_cache_elements_per_token()
         print(
             f"{name}: Q heads={attention.num_query_heads}, "
             f"KV heads={attention.num_kv_heads}, "
             f"cache elements/token={attention.kv_cache_elements_per_token()}, "
+            f"parameters={parameter_counts[name]}, "
+            f"compact/expanded K elements={cache[0].numel()}/{expanded_key.numel()}, "
             f"output={tuple(output.shape)}, weights={tuple(weights.shape)}"
         )
+
+    assert parameter_counts["MHA"] > parameter_counts["GQA"] > parameter_counts["MQA"]
+    assert cache_sizes["MHA"] > cache_sizes["GQA"] > cache_sizes["MQA"]
+    print("Production kernels keep compact KV and share it without materializing repeats.")
 
 
 if __name__ == "__main__":

@@ -1,14 +1,35 @@
 import torch
 
-from labs.lab00_positional_encoding import sinusoidal_position_encoding
-from labs.lab01_attention_basics import scaled_dot_product_attention
-from labs.lab02_multi_head_attention import merge_heads, split_heads
+from labs.lab00_positional_encoding import (
+    shift_sinusoidal_pair,
+    sinusoidal_position_encoding,
+)
+from labs.lab01_attention_basics import (
+    scaled_dot_product_attention,
+    score_scale_statistics,
+)
+from labs.lab02_multi_head_attention import (
+    TinyMultiHeadAttention,
+    merge_heads,
+    parameter_count as mha_parameter_count,
+    split_heads,
+)
+from labs.lab03_pre_ln_block import identity_path_gradient
 from labs.lab04_tiny_copy_task import make_copy_batch
 from labs.lab05_tiny_language_model import make_pattern_batch
-from labs.lab06_kv_cache import compare_full_and_cached
-from labs.lab07_modern_blocks import RMSNorm, SwiGLU, apply_rope
+from labs.lab06_kv_cache import compare_full_and_cached, projection_token_work
+from labs.lab07_modern_blocks import (
+    RMSNorm,
+    SwiGLU,
+    apply_rope,
+    equal_budget_swiglu_hidden,
+)
 from labs.lab08_moe_routing import TopKMoE
-from labs.lab09_lora_linear import run_demo as run_lora_demo
+from labs.lab09_lora_linear import (
+    LoRALinear,
+    initial_gradient_norms,
+    run_demo as run_lora_demo,
+)
 from labs.lab10_mha_mqa_gqa import GroupedQuerySelfAttention
 from labs.lab11_moe_variants import DenseMoE, SharedExpertSparseMoE, SparseMoE
 
@@ -28,11 +49,30 @@ def test_sinusoidal_position_zero_has_expected_pattern():
     assert encoding.shape == (6, 8)
     assert torch.allclose(encoding[0, 0::2], torch.zeros(4))
     assert torch.allclose(encoding[0, 1::2], torch.ones(4))
+    assert torch.allclose(
+        shift_sinusoidal_pair(encoding[1, :2], 2.0),
+        encoding[3, :2],
+        atol=1e-6,
+    )
+
+
+def test_attention_scaling_restores_unit_score_scale():
+    torch.manual_seed(3)
+    raw_std, scaled_std = score_scale_statistics(samples=4096, head_dim=64)
+    assert raw_std > scaled_std * 6
+    assert 0.8 < scaled_std < 1.2
 
 
 def test_split_and_merge_heads_are_inverse():
     x = torch.randn(2, 5, 16)
     assert torch.allclose(merge_heads(split_heads(x, 4)), x)
+    assert mha_parameter_count(TinyMultiHeadAttention(16, 4)) == 1088
+
+
+def test_zero_residual_branches_preserve_identity_gradient():
+    difference, gradient = identity_path_gradient()
+    assert difference == 0.0
+    assert torch.equal(gradient, torch.ones_like(gradient))
 
 
 def test_synthetic_task_batches_have_next_token_alignment():
@@ -46,6 +86,7 @@ def test_synthetic_task_batches_have_next_token_alignment():
 
 def test_kv_cache_matches_full_attention():
     assert compare_full_and_cached() < 1e-6
+    assert projection_token_work(7) == (28, 7)
 
 
 def test_modern_blocks_preserve_expected_shapes():
@@ -57,6 +98,7 @@ def test_modern_blocks_preserve_expected_shapes():
     hidden = torch.randn(2, 5, 16)
     assert RMSNorm(16)(hidden).shape == hidden.shape
     assert SwiGLU(16, 32)(hidden).shape == hidden.shape
+    assert equal_budget_swiglu_hidden(48, 192) == 128
 
 
 def test_moe_routes_every_token_to_top_k_experts():
@@ -72,6 +114,14 @@ def test_lora_starts_equal_to_base_and_can_fuse():
     initial_difference, fused_difference = run_lora_demo()
     assert initial_difference == 0.0
     assert fused_difference < 1e-5
+
+    base = torch.nn.Linear(6, 4)
+    lora = LoRALinear(base, rank=2, alpha=4.0)
+    x = torch.randn(8, 6)
+    target = torch.randn(8, 4)
+    grad_a, grad_b = initial_gradient_norms(lora, x, target)
+    assert grad_a == 0.0
+    assert grad_b > 0.0
 
 
 def test_mha_mqa_gqa_share_one_implementation():

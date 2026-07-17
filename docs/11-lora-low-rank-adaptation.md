@@ -148,8 +148,10 @@ python -m labs.lab09_lora_linear
 实验验证：
 
 1. B 为零时初始输出与基座一致。
-2. 只有低秩参数可训练。
-3. Fuse 前后输出一致。
+2. 第一训练步 A 梯度为零、B 梯度非零。
+3. 只有低秩参数可训练，optimizer 只接收 A/B。
+4. `rank(Delta-W) <= configured rank`。
+5. Eval 模式下 Fuse 前后输出一致。
 
 ## 对照源码
 
@@ -304,6 +306,259 @@ base model
 ```
 
 推理时可以切换 adapter，但同时组合多个 adapter 需要明确权重、目标层冲突和缩放规则。
+
+## 权重布局：公式必须绑定框架约定
+
+对行向量输入，教学公式：
+
+```text
+y = x @ W_math
+W_math: [in,out]
+```
+
+PyTorch/MLX Linear 通常保存：
+
+```text
+weight: [out,in]
+y = x @ weight.T
+```
+
+本项目 A/B：
+
+```text
+A: [in,r]
+B: [r,out]
+forward delta: x @ A @ B
+stored Delta-weight: (A @ B).T = B.T @ A.T
+```
+
+因此 `delta_weight()` 返回 `[out,in]`：
+
+```python
+return scale * (A @ B).T          # PyTorch Lab
+return (scale * B.T) @ A.T        # MLX implementation
+```
+
+二者数学相同。讨论 LoRA 时若只写 `BA` 而不标 shape，很容易在不同论文/框架命名约定间把
+A、B 对调。
+
+## 低秩更新限制了哪些方向
+
+$$
+\Delta W=A B
+$$
+
+满足：
+
+$$
+rank(\Delta W)\le r
+$$
+
+`A` 把输入映射到 r 维中间坐标，`B` 把这些坐标映射到输出。Delta-W 的列空间和行空间都
+被这两个小矩阵限制，因此不是任意 full-rank 更新。
+
+但多个 LoRA 层之间夹着非线性、Attention 和 residual。整个网络函数的变化不等于一个全局
+rank-r 线性映射；“低秩”只描述每个被注入权重的局部参数增量。
+
+训练后可检查：
+
+```python
+singular_values = torch.linalg.svdvals(delta_weight.float())
+effective_rank = (singular_values > tolerance).sum()
+assert effective_rank <= rank
+```
+
+浮点误差下理论零奇异值可能表现为很小非零值，因此需要 tolerance。
+
+## 首步梯度的矩阵推导
+
+令：
+
+```text
+Z = X A
+U = Z B
+G = dL/dU
+```
+
+则：
+
+$$
+\frac{\partial L}{\partial B}=Z^TG
+$$
+
+$$
+\frac{\partial L}{\partial A}=X^TGB^T
+$$
+
+初始化 `B=0` 时：
+
+```text
+dL/dA = 0
+dL/dB = (X A)^T G，通常非零
+```
+
+所以第一步 B 先离开零，后续 A 才获得梯度。若 A/B 都为零：
+
+```text
+Z = X A = 0 -> dL/dB = 0
+dL/dA contains B -> 0
+```
+
+两者都无法启动。这里不是模糊的“缺少对称性”，而是可以直接由导数看出梯度为零。
+
+## Alpha/Rank 缩放改变更新幅度
+
+项目使用：
+
+$$
+scale=\frac{\alpha}{r}
+$$
+
+若增加 rank 而保持 alpha 不变，单个分支整体缩放减小；若保持 `alpha/r` 不变，则 alpha
+需要随 rank 线性增加。不同实验比较 rank 时必须同时报告 alpha 和最终 scale。
+
+其他实现可能使用 `alpha/sqrt(r)`。该约定旨在不同 rank 下维持不同的更新统计尺度，但与
+`alpha/r` 训练出的 adapter 不兼容。Adapter config 中只记录 alpha 而省略 scaling 规则仍然
+不够。
+
+## LoRA Dropout 与 Fuse 的等价条件
+
+训练时：
+
+```text
+xW + scale * dropout(x) A B
+```
+
+Dropout 使每次 forward 的分支随机，不能与一个固定 fused weight 逐次等价。评估时
+`dropout` 关闭，动态 adapter 才满足：
+
+$$
+xW+x\Delta W=x(W+\Delta W)
+$$
+
+因此 fuse 对比必须：
+
+```python
+lora.eval()
+with torch.no_grad():
+    dynamic = lora(x)
+    fused = lora.fuse()(x)
+```
+
+若在 train mode 比较，差异可能只是 dropout，而不是 fuse 公式错误。
+
+## Fuse 的精度与生命周期
+
+融合时要处理：
+
+- Delta-W 的 dtype 是否先在 FP32 累加再转回。
+- Bias 是否原样复制。
+- 是否已经 fuse 过，避免重复加 Delta-W。
+- 原 adapter 是否还要保留以支持卸载/切换。
+- 量化基座是否允许直接相加，或需要反量化再重新量化。
+
+动态 LoRA 在低精度下执行两次小 GEMM；fused 模型执行一次原 Linear。二者浮点运算顺序不同，
+应使用相对/绝对容差，而不是要求 bitwise equal。
+
+## 冻结与 Optimizer 参数集合
+
+仅设置：
+
+```python
+base.requires_grad_(False)
+```
+
+还应确认 optimizer 只接收可训练参数：
+
+```python
+trainable = [p for p in model.parameters() if p.requires_grad]
+optimizer = torch.optim.AdamW(trainable, lr=...)
+```
+
+把冻结参数放进 optimizer 通常不会更新它们，但会增加遍历和状态风险。MLX 项目通过
+`model.freeze()` 后只保存/更新 `trainable_parameters()`。
+
+验证：
+
+```text
+trainable parameter names
+trainable / total ratio
+optimizer state keys
+base weight checksum before/after
+```
+
+仅打印总参数量无法证明冻结正确。
+
+## 目标模块匹配必须可审计
+
+字符串目标如 `q_proj,v_proj` 可能因模型命名不同而一个都匹配不到，或误匹配非 Linear。
+项目 `inject_lora()`：
+
+1. 先冻结整个模型。
+2. 只遍历最后 N 个 block。
+3. 检查 leaf name 是否在 target set。
+4. 验证目标是 Linear。
+5. 替换并记录完整 module path。
+6. 若替换数为 0，直接报错。
+
+Adapter metadata 保存相对 key，使加载端能在相同 block 结构中重建 LoRA 模块。训练日志应
+输出实际 replaced module list，而不只输出用户请求的 target 字符串。
+
+## 多 Adapter 的线性与非线性
+
+同一 Linear 上多个 adapter 可形式化为：
+
+$$
+W'=W+\lambda_1\Delta W_1+\lambda_2\Delta W_2
+$$
+
+在该层局部是线性叠加。但 adapter 分布在多层，经过非线性和 Attention 后，整个模型输出
+不会等于各 adapter 输出的简单加权和。组合还要求：
+
+- 同一个基座 checkpoint。
+- 兼容 tokenizer 和模型结构。
+- 目标层 shape 一致。
+- 缩放与权重系数明确。
+
+不能把来自不同 base revision 的 adapter 直接相加。
+
+## 可运行的首步梯度检查
+
+```python
+import torch
+
+torch.manual_seed(0)
+x = torch.randn(8, 6)
+A = torch.nn.Parameter(torch.randn(6, 2) * 0.01)
+B = torch.nn.Parameter(torch.zeros(2, 4))
+target = torch.randn(8, 4)
+
+output = x @ A @ B
+loss = (output - target).square().mean()
+loss.backward()
+
+assert torch.count_nonzero(A.grad) == 0
+assert B.grad.abs().sum() > 0
+
+with torch.no_grad():
+    B -= 0.1 * B.grad
+A.grad = None
+B.grad = None
+
+loss = ((x @ A @ B) - target).square().mean()
+loss.backward()
+assert A.grad.abs().sum() > 0
+```
+
+## 本章调试不变量
+
+1. 每个 A/B shape 与目标 Linear 的 in/out layout 一致。
+2. B=0 时注入前后 eval 输出一致。
+3. 首步 A grad 为零、B grad 通常非零；第二步后 A 开始学习。
+4. 只有 LoRA 参数可训练，基座权重 checksum 不变。
+5. Adapter metadata 包含 base、rank、alpha、scale 规则、dropout、目标层和层数。
+6. Fuse 在 eval mode 比较，处理 dtype/bias，且不重复融合。
+7. 保存的 trainable key 与加载端重建出的 key 完全一致。
 
 ## 常见错误
 

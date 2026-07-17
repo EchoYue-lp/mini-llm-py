@@ -42,21 +42,30 @@ class TinyMultiHeadAttention(nn.Module):
         return self.out_proj(merge_heads(attended)), weights
 
 
+def parameter_count(module):
+    return sum(parameter.numel() for parameter in module.parameters())
+
+
 def run_demo():
     torch.manual_seed(0)
     x = torch.randn(2, 5, 16)
     mask = torch.tril(torch.ones(5, 5, dtype=torch.bool)).view(1, 1, 5, 5)
     model = TinyMultiHeadAttention(d_model=16, num_heads=4)
     output, weights = model(x, mask)
+    heads = split_heads(x, 4)
 
     assert output.shape == x.shape
     assert weights.shape == (2, 4, 5, 5)
-    assert torch.allclose(merge_heads(split_heads(x, 4)), x)
+    assert torch.allclose(merge_heads(heads), x)
+    assert not heads.is_contiguous()
+    assert parameter_count(model) == 4 * (16 * 16 + 16)
 
     print("input:", x.shape)
     print("per-head Q/K/V:", (2, 4, 5, 4))
     print("attention weights:", weights.shape)
     print("merged output:", output.shape)
+    print("split stride:", heads.stride(), "contiguous:", heads.is_contiguous())
+    print("Q/K/V/O parameters including bias:", parameter_count(model))
 
 
 if __name__ == "__main__":

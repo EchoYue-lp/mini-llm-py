@@ -3,6 +3,7 @@
 `mini-llm-py` 是一个从 Transformer 基础实现延伸到 LLM 后训练的学习型项目。
 仓库同时包含：
 
+- 数学、NumPy、Pandas 和 PyTorch 的可运行前置课程。
 - 使用 PyTorch 从零实现的 Encoder-Decoder 和 Decoder-Only Transformer。
 - 从位置编码、Attention 到 KV Cache、LoRA、GQA 和 MoE 的 12 个小实验。
 - 英中翻译与文本生成的数据、训练、checkpoint、推理闭环。
@@ -18,6 +19,7 @@ mini-llm-py/
 ├── docs/             所有专题文档
 ├── evaluation/       数据校验、模型评测和结果对比
 ├── finetuning/       MLX LoRA 短训练与长训练
+├── foundations/      数学、NumPy、Pandas 与 PyTorch 前置课程
 ├── inference/        基座模型和 adapter 推理
 ├── labs/             12 个 Transformer / LLM 小实验
 ├── models/           PyTorch Transformer 模型实现
@@ -41,13 +43,16 @@ scripts / labs / tests / finetuning / inference / evaluation
                          models + utils
 ```
 
+`foundations/` 只依赖 Python、NumPy、Pandas 和 PyTorch，不导入 `models/` 或 `utils/`，
+因此可以在阅读项目实现之前独立完成。
+
 ## 环境要求
 
 项目保留三份依赖文件，它们不是三套互相重复的依赖：
 
 | 文件 | 用途 | 应安装到哪里 |
 | --- | --- | --- |
-| `requirements.txt` | PyTorch 模型、训练和推理运行时 | `.venv` |
+| `requirements.txt` | NumPy/Pandas 前置课程与 PyTorch 运行时 | `.venv` |
 | `requirements-dev.txt` | 继承运行时依赖，再增加 pytest | `.venv` |
 | `requirements-mlx.txt` | Apple Silicon 的 MLX 后训练 | `.venv-mlx` |
 
@@ -91,7 +96,25 @@ Hugging Face Hub 1.23.0。
 
 ## 学习路线
 
-建议先运行不依赖大数据集的实验：
+先完成不依赖数据集和 checkpoint 的前置课程：
+
+```bash
+python -m foundations.f00_math_basics
+python -m foundations.f01_numpy_basics
+python -m foundations.f02_embedding_geometry
+python -m foundations.f03_pandas_basics
+python -m foundations.f04_pytorch_tensors
+python -m foundations.f05_pytorch_autograd
+python -m foundations.f06_pytorch_training
+```
+
+也可以一次运行全部前置课程：
+
+```bash
+python -m foundations
+```
+
+然后运行 Transformer 实验：
 
 ```bash
 python -m labs.lab00_positional_encoding
@@ -108,8 +131,10 @@ python -m labs.lab10_mha_mqa_gqa
 python -m labs.lab11_moe_variants
 ```
 
+每个实验的核心问题、观察量和修改建议见 [Labs 使用指南](labs/README.md)。
+
 完整学习顺序见
-[00 学习路线与代码地图](docs/00-learning-path-and-code-map.md)。
+[00 学习路线、代码地图与工程数学基础](docs/00-learning-path-and-code-map.md)。
 
 ## PyTorch 英中翻译
 
@@ -341,13 +366,16 @@ make check
 - 通用训练、生成和路径逻辑放入 `utils/`。
 - 完整命令入口放入 `scripts/`。
 - 后训练实现按职责放入 `finetuning/`、`inference/`、`evaluation/`。
+- 数学、数据和框架前置课程放入 `foundations/`。
 - 教学实验放入 `labs/`。
 - 测试放入 `tests/`。
-- 除本文件外，所有 Markdown 文档放入 `docs/`。
+- 专题原理文档放入 `docs/`，课程包入口保留在 `foundations/README.md` 和 `labs/README.md`。
 
 ## 文档
 
-- [00 学习路线与代码地图](docs/00-learning-path-and-code-map.md)
+- [Foundations 前置课程](foundations/README.md)
+- [Transformer Labs 使用指南](labs/README.md)
+- [00 学习路线、代码地图与工程数学基础](docs/00-learning-path-and-code-map.md)
 - [01 Tokenizer、Embedding 与 Logits](docs/01-tokenization-embedding-and-logits.md)
 - [02 位置编码与 RoPE](docs/02-positional-encoding-and-rope.md)
 - [03 Scaled Attention 与 Mask](docs/03-scaled-attention-and-masks.md)

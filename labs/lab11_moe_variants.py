@@ -53,13 +53,17 @@ class SparseMoE(nn.Module):
             [Expert(d_model, hidden_dim) for _ in range(num_experts)]
         )
 
-    def forward(self, x):
-        shape = x.shape
-        tokens = x.reshape(-1, x.size(-1))
+    def route(self, tokens):
         probabilities = torch.softmax(self.router(tokens), dim=-1)
         top_weights, top_indices = probabilities.topk(self.top_k, dim=-1)
         if self.renormalize_topk:
             top_weights = top_weights / top_weights.sum(dim=-1, keepdim=True)
+        return probabilities, top_weights, top_indices
+
+    def forward(self, x):
+        shape = x.shape
+        tokens = x.reshape(-1, x.size(-1))
+        probabilities, top_weights, top_indices = self.route(tokens)
 
         output = torch.zeros_like(tokens)
         counts = []
@@ -115,32 +119,64 @@ class SharedExpertSparseMoE(nn.Module):
         return shared_output + routed_output, routes, counts, balance_loss
 
 
+def parameter_count(module):
+    return sum(parameter.numel() for parameter in module.parameters())
+
+
 def run_demo():
     torch.manual_seed(0)
     x = torch.randn(2, 5, 16)
 
-    dense_output, dense_weights = DenseMoE(num_experts=4)(x)
-    sparse_output, routes, counts, balance_loss = SparseMoE(
+    dense = DenseMoE(num_experts=4)
+    sparse = SparseMoE(
         num_experts=8, top_k=2
-    )(x)
-    shared_output, shared_routes, shared_counts, shared_balance = (
-        SharedExpertSparseMoE(
-            num_shared_experts=1,
-            num_routed_experts=8,
-            top_k=2,
-        )(x)
     )
+    shared = SharedExpertSparseMoE(
+        num_shared_experts=1,
+        num_routed_experts=8,
+        top_k=2,
+    )
+
+    dense_output, dense_weights = dense(x)
+    sparse_output, routes, counts, balance_loss = sparse(x)
+    shared_output, shared_routes, shared_counts, shared_balance = shared(x)
 
     assert dense_output.shape == sparse_output.shape == shared_output.shape == x.shape
     assert dense_weights.shape == (2, 5, 4)
     assert routes.shape == shared_routes.shape == (2, 5, 2)
     assert sum(counts) == sum(shared_counts) == 2 * 5 * 2
+    assert torch.allclose(dense_weights.sum(-1), torch.ones(2, 5))
 
-    print("Dense MoE: all 4 experts run for every token")
+    tokens = x.reshape(-1, x.size(-1))
+    _, sparse_weights, _ = sparse.route(tokens)
+    _, shared_routed_weights, _ = shared.routed.route(tokens)
+    assert torch.allclose(sparse_weights.sum(-1), torch.ones(tokens.size(0)))
+    assert torch.all(shared_routed_weights.sum(-1) <= 1 + 1e-6)
+
+    (sparse_output.square().mean() + 0.01 * balance_loss).backward()
+    experts_with_tokens = sum(count > 0 for count in counts)
+    experts_with_grad = sum(
+        expert.up.weight.grad is not None for expert in sparse.experts
+    )
+    assert experts_with_grad == experts_with_tokens
+
+    dense_parameters = parameter_count(dense)
+    sparse_parameters = parameter_count(sparse)
+    shared_parameters = parameter_count(shared)
+
+    print("Dense MoE: all 4 experts run for every token; parameters:", dense_parameters)
     print("Sparse MoE routed counts:", counts)
     print("Sparse balance loss:", balance_loss.item())
+    print("Sparse parameters/active experts per token:", sparse_parameters, 2)
+    print("Sparse experts with token/gradient:", experts_with_tokens, experts_with_grad)
     print("Shared-expert Sparse MoE routed counts:", shared_counts)
+    print("Shared parameters/active experts per token:", shared_parameters, 3)
     print("Shared expert count: 1, always active for all tokens")
+    print("Sparse top-k weight sum:", sparse_weights.sum(-1)[:3].tolist())
+    print(
+        "Shared routed weight mass before adding shared expert:",
+        shared_routed_weights.sum(-1)[:3].tolist(),
+    )
     print("Shared variant balance loss:", shared_balance.item())
 
 

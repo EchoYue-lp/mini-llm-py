@@ -407,6 +407,259 @@ tokens/s
 
 训练方法越复杂，越需要稳定的数据与评测基础。
 
+## 工作流不是命令列表，而是产物依赖图
+
+完整依赖关系：
+
+```text
+model snapshot ------------------------------+
+                                                |
+raw example definitions -> train/valid/test ----+-> training
+                                                |      |
+chat template/tokenizer ------------------------+      v
+                                                |   adapter + config + history
+                                                |      |
+fixed test + parser + metrics ------------------+------+
+                                                       v
+                                                  evaluation report
+```
+
+任何上游产物变化都会使下游结果失去可比性。例如只改 system prompt，不重新训练却直接比较
+adapter，输入 token 边界已经变化；只改 parser，历史模型的 JSON valid 指标也会变化。
+
+建议为每次实验保存 manifest：
+
+```json
+{
+  "git_commit": "...",
+  "base_model": "Qwen/Qwen3-0.6B",
+  "base_revision": "...",
+  "data_sha256": "...",
+  "tokenizer_revision": "...",
+  "mlx_lm_version": "0.31.3",
+  "seed": 0,
+  "adapter_config": "adapter_config.json"
+}
+```
+
+## 模型 Snapshot 与 Revision
+
+`snapshot_download()` 当前指定 repo id 和本地目录，没有固定 revision。因此不同日期重新下载
+可能得到不同上游提交。教学流程可接受，正式实验应：
+
+```python
+snapshot_download(
+    repo_id="Qwen/Qwen3-0.6B",
+    revision="full-commit-sha",
+    local_dir=...,
+)
+```
+
+并记录关键文件哈希。模型名称相同不保证权重、配置、tokenizer 与 chat template 完全相同。
+
+离线运行前要确认本地目录包含 config、tokenizer 和权重分片，而不是只检查目录存在。
+
+## Chat Template 必须贯穿三条路径
+
+训练：
+
+```python
+tokenizer.apply_chat_template(
+    messages,
+    enable_thinking=False,
+)
+```
+
+推理/评测：
+
+```python
+tokenizer.apply_chat_template(
+    messages_without_answer,
+    tokenize=False,
+    add_generation_prompt=True,
+    enable_thinking=False,
+)
+```
+
+需要保持一致的不是函数名，而是最终 token 序列：
+
+- 相同 system prompt。
+- 相同 role 顺序。
+- 相同 thinking 开关。
+- 相同 assistant prefix。
+- 相同 tokenizer files。
+
+可以在 smoke test 中保存一条训练样本的 prompt token ids，再与推理模板生成的前缀逐 token
+比较。模板漂移通常不会引发加载错误，只会表现为质量突然下降。
+
+## MLX Lazy Execution 的阶段边界
+
+MLX 表达式通常 lazy 执行。训练循环中的 `mx.eval(...)` 是真正的同步边界。理解这一点才能
+正确解释：
+
+- 为什么 Python 循环结束不代表设备计算已经结束。
+- 为什么计时前后需要物化结果。
+- 为什么打印 `.item()` 会隐式同步。
+- 为什么 optimizer state 也要包含在 eval 中。
+
+测量步骤耗时的基本结构：
+
+```python
+start = time.perf_counter()
+loss, gradients = loss_and_grad(model, batch, lengths)
+optimizer.update(model, gradients)
+mx.eval(model.parameters(), optimizer.state, loss)
+elapsed = time.perf_counter() - start
+```
+
+若把 `mx.eval` 放到计时区间外，记录的只是 graph 构建时间。
+
+## 统一内存不等于无限内存
+
+Apple Silicon CPU/GPU 共享统一内存，减少显式 host-device copy，但模型权重、activation、
+optimizer state、临时 kernel workspace、Python 进程和系统应用仍竞争同一物理容量。
+
+OOM 调参优先级取决于占用来源：
+
+| 参数 | 主要影响 |
+| --- | --- |
+| Sequence length | Attention/activation，常是强影响项 |
+| Microbatch size | Activation 近似线性增加 |
+| Adapted layers | LoRA 参数、梯度和部分图状态 |
+| Rank | LoRA 参数/optimizer 状态，通常小于 activation 影响 |
+| Grad accumulation | 有效 batch 增大，但不降低单 microbatch 峰值 |
+
+关闭其他高内存应用可能改善可用容量，但不应替代记录可复现的训练配置。
+
+## Adapter 加载协议
+
+加载过程不是“找到 safetensors 就相加”：
+
+1. 加载与训练一致的 base model。
+2. 读取 `adapter_config.json`。
+3. 根据 `num_layers` 与 `keys` 重建 LoRA module。
+4. 根据 rank/scale 创建 A/B shape。
+5. 加载 safetensors trainable keys。
+6. 执行推理并验证输出有限。
+
+因此以下任一变化都会失败或静默错配：
+
+- Base 模型层数/模块命名改变。
+- Adapter key 使用绝对路径，加载端期待相对路径。
+- Rank 与权重 shape 不一致。
+- Scale 规则不同。
+- 使用了同名但不同 revision 的模型。
+
+Smoke test 应在保存后启动一个全新进程重新加载 adapter，而不是只用内存中的已训练 model
+推理；后者无法验证磁盘产物完整性。
+
+## Short 与 Long 实验的隔离
+
+两次训练必须使用不同 adapter 目录。否则可能发生：
+
+- Long final 覆盖 short final。
+- `best_adapters.safetensors` 来自不同配置。
+- comparison 报告加载错目录。
+- 旧 periodic snapshot 混入新实验。
+
+运行前应检查目标目录是否为空或 manifest 是否匹配。不要自动删除未知目录；使用包含配置
+摘要和 seed 的新目录更安全。
+
+## 阶段 Gate：每步通过什么才继续
+
+| 阶段 | 必须通过的 Gate |
+| --- | --- |
+| 环境 | 正确解释器、MLX/MLX-LM import、Metal device |
+| 模型 | 本地完整加载、tokenizer/template 可用、基础生成有限 |
+| 数据 | Validator 全通过、split 数量/分布/哈希已记录 |
+| 注入 | 替换模块数非零、trainable ratio 符合预期、Delta-W 初始为 0 |
+| 训练 | supervised token 非零、loss/grad 有限、参数确实更新 |
+| 保存 | config + safetensors + history 可读 |
+| 重载 | 新进程能加载 adapter 并生成 |
+| 评测 | 固定 test/parser/sampler，逐样本报告已保存 |
+
+上一 Gate 未通过时不要进入下一阶段。比如 adapter 无法重载，继续跑 300 步只会产生更昂贵
+但不可部署的产物。
+
+## 端到端 Preflight 示例
+
+```bash
+python -m evaluation.validate_tool_router_data
+python -m finetuning.train_lora_short --dry-run
+python -m finetuning.train_lora_short --iters 2 --num-layers 2
+python -m inference.tool_router \
+  "查一下订单A1024到哪里了" \
+  --adapter artifacts/adapters/tool-router-short
+python -m evaluation.tool_router \
+  --adapter artifacts/adapters/tool-router-short \
+  --label smoke \
+  --output artifacts/results/tool-router/smoke.json
+```
+
+检查 smoke report 不只看命令退出码，还要确认：
+
+```text
+samples > 0
+raw responses non-empty
+metrics keys complete
+predictions count == samples
+adapter path recorded correctly
+```
+
+## 性能测量的可比条件
+
+Tokens/s 和 peak memory 只有在以下配置相同时才可比较：
+
+- 模型与 adapter targets。
+- Microbatch、accumulation、sequence length 分布。
+- dtype 与 MLX/MLX-LM 版本。
+- 报告窗口是否包含 validation/save。
+- 是否经过 warm-up。
+- `mx.eval` 同步位置。
+
+短训练的前几步包含模型/kernel warm-up，不能直接与长训练稳定阶段比较。Peak memory 是进程
+生命周期高水位，某次保存或评测临时分配也可能抬高数值。
+
+## 失败恢复边界
+
+当前 periodic adapter 只保存 LoRA 权重，不保存 Adam/RNG/迭代器状态，因此可以用于：
+
+- 加载推理。
+- 从该权重开始一个新的训练实验。
+- 比较不同训练阶段。
+
+不能保证从第 N 步“精确续跑”出与不中断训练相同的第 N+1 步。若要支持精确 resume，需要
+额外保存 optimizer state、iteration、RNG、数据顺序和未完成 accumulation 状态，并验证恢复
+后下一步 loss/gradient 与原运行一致。
+
+## 最终交付清单
+
+一次可审计实验至少保留：
+
+```text
+adapter_config.json
+best_adapters.safetensors
+adapters.safetensors
+training_history.json
+training_summary.json
+evaluation JSON reports
+comparison.md
+experiment manifest with revisions/hashes
+```
+
+还应明确部署使用 best 还是 final。文件存在不代表有效，应在全新进程中完成 load + one
+generation + schema validation。
+
+## 本章调试不变量
+
+1. 所有命令从仓库根目录运行，路径经 `project_paths` 解析。
+2. Base revision、tokenizer、chat template 在训练/推理/评测完全一致。
+3. 每个阶段有明确输入、输出和通过 Gate，不跳步猜测。
+4. MLX 计时与状态读取前经过 `mx.eval` 同步。
+5. Short/long/smoke 使用隔离目录和可追溯 manifest。
+6. Adapter 保存后必须在新进程重载验证。
+7. 教学百分比始终同时报告样本数，不作为生产结论。
+
 ## 自测
 
 1. Dry-run 能验证哪些内容，不能验证哪些内容？

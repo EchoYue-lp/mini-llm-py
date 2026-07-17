@@ -89,6 +89,8 @@ python -m labs.lab07_modern_blocks
 - RMSNorm 是否保持 shape。
 - RoPE 是否保持向量范数。
 - SwiGLU 的 gate 与 up 分支 shape 是否一致。
+- RoPE offset 改变时相位是否改变而范数不变。
+- 经典 FFN 与等参数预算 SwiGLU 的 hidden size/权重数。
 
 ## 对照源码
 
@@ -221,6 +223,174 @@ SiLU(x) = x * sigmoid(x)
 7. Embedding 与 output head 是否共享。
 
 只说“这是 Llama 风格 block”不够精确。
+
+## RMSNorm 的尺度性质
+
+忽略 epsilon 和可训练 weight，定义：
+
+$$
+RMSNorm(x)=\frac{x}{\sqrt{\frac{1}{D}\sum_dx_d^2}}
+$$
+
+对正标量 `c`：
+
+$$
+RMSNorm(cx)=RMSNorm(x)
+$$
+
+对负标量则保留符号翻转。这说明 RMSNorm 对输入整体幅值近似不敏感，让后续子层看到更
+稳定的尺度。
+
+但它不具备平移不变性：
+
+```text
+RMSNorm(x + constant) != RMSNorm(x)
+```
+
+因为它不减均值。LayerNorm 会移除沿全 1 向量方向的均值分量，RMSNorm 保留该信息。二者
+不是“少一个减法、效果完全相同”，而是对表示空间施加不同约束。
+
+## RMSNorm 的数值精度
+
+低精度输入平方时可能溢出或损失精度。生产实现常在更高精度中计算统计量，再转回输入
+dtype：
+
+```python
+def rms_norm(x, weight, eps):
+    input_dtype = x.dtype
+    x_float = x.float()
+    inv_rms = torch.rsqrt(x_float.square().mean(-1, keepdim=True) + eps)
+    return (x_float * inv_rms * weight.float()).to(input_dtype)
+```
+
+本项目 Lab 已使用 FP32 计算 RMS 统计量，再转回输入 dtype。用 FP16/BF16 扩展实验时，仍应
+检查极大值、全零输入和接近常数输入。
+
+Epsilon 的位置也属于模型定义：
+
+```text
+1 / sqrt(mean(x^2) + eps)
+```
+
+与 `1 / (sqrt(mean(x^2)) + eps)` 不完全相同，加载 checkpoint 时不能混淆。
+
+## RMSNorm 的输出 RMS 为什么不一定正好为 1
+
+若 `eps=0`、weight 全 1，归一化输出的 RMS 为 1。实际中：
+
+- epsilon 会让极小输入的输出 RMS 小于 1。
+- 可训练 weight 按维缩放后，整体 RMS 会改变。
+- 有限精度带来舍入误差。
+
+因此测试应检查公式一致与数值有限，而不是强制所有训练后输出 RMS 精确等于 1。
+
+## RoPE 的 Rotary Dimension
+
+有些模型只旋转每个 head 的前 `rotary_dim` 个通道，其余通道不变：
+
+```text
+Q = [Q_rotary, Q_pass]
+K = [K_rotary, K_pass]
+```
+
+约束：
+
+```text
+0 < rotary_dim <= Dh
+rotary_dim % 2 == 0
+```
+
+本项目 Lab 旋转整个 `Dh`。读取其他模型时必须检查 rotary percentage/dimension，不能只看
+到 `apply_rope` 名称就假设全部通道参与。
+
+RoPE base、scaling、position offset 和 pair layout 都属于 checkpoint 协议。常见 pair layout
+既可能是相邻偶奇维，也可能是把前后半维配对；两者 shape 相同但旋转结果不同。
+
+## SwiGLU 的参数等预算推导
+
+普通 `Dff=4D` FFN 参数近似：
+
+$$
+2D(4D)=8D^2
+$$
+
+SwiGLU 中间维为 `F`：
+
+$$
+3DF
+$$
+
+令两者相等：
+
+$$
+3DF=8D^2\Rightarrow F=\frac{8}{3}D\approx2.67D
+$$
+
+所以现代模型常把 SwiGLU hidden size 设在约 `2.67D` 附近，再按硬件友好的倍数取整，而
+不是直接使用 `4D`。如果 `F=4D`，SwiGLU 参数会变成 `12D^2`，比经典 FFN 多 50%。
+
+## SwiGLU 的门控梯度
+
+中间表示：
+
+$$
+h=SiLU(g)\odot u
+$$
+
+对 `u` 的梯度被 `SiLU(g)` 缩放，对 `g` 的梯度同时依赖 `u` 与 SiLU 导数：
+
+$$
+\frac{\partial h}{\partial u}=SiLU(g)
+$$
+
+$$
+\frac{\partial h}{\partial g}=u\odot SiLU'(g)
+$$
+
+因此 gate 不只是“开/关”：它连续调节 up 分支的值和梯度。若 gate 极度负饱和，通道贡献
+会接近零；若 up 分支接近零，gate 也难从该样本得到强梯度。
+
+## Bias 与模型兼容性
+
+本项目 `SwiGLU` 三个 Linear 都使用 `bias=False`。不同模型可能：
+
+- Attention/FFN 全部无 bias。
+- 只有部分 projection 有 bias。
+- Norm 有或没有 bias。
+
+Bias 会改变参数 key 和 forward。加载 state dict 时即使允许 `strict=False`，缺失 bias 也可能
+造成静默行为差异。模型转换应逐层比较参数名称、shape 和 forward 最大误差。
+
+## 最小模块等价检查
+
+```python
+import torch
+
+torch.manual_seed(0)
+x = torch.randn(2, 5, 16)
+
+norm = RMSNorm(16)
+normalized = norm(x)
+manual = x * x.pow(2).mean(-1, keepdim=True).add(norm.eps).rsqrt()
+manual = manual * norm.weight
+assert torch.allclose(normalized, manual)
+
+ffn = SwiGLU(16, 32)
+output = ffn(x)
+gate = torch.nn.functional.silu(ffn.gate(x))
+up = ffn.up(x)
+assert torch.allclose(output, ffn.down(gate * up))
+assert output.shape == x.shape
+```
+
+## 本章调试不变量
+
+1. RMSNorm 只沿最后一维统计，weight shape 等于 hidden size。
+2. 低精度实验中统计量有限，epsilon 与 checkpoint 配置一致。
+3. RoPE 只作用指定 rotary dimension 的 Q/K，position offset 与 cache 对齐。
+4. Gate/up 输出 shape 完全一致，down projection 回到 `D`。
+5. SwiGLU 参数预算使用 `3DF`，不沿用经典 `2DDff`。
+6. Bias、RoPE pair layout、base 和 norm epsilon 都纳入模型兼容检查。
 
 ## 常见错误
 

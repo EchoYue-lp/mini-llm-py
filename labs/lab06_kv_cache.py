@@ -40,6 +40,13 @@ class CachedSelfAttention(nn.Module):
         return self.out_proj(weights @ value), (key, value)
 
 
+def projection_token_work(sequence_length):
+    """Compare token projections with full-prefix recompute and KV caching."""
+    without_cache = sequence_length * (sequence_length + 1) // 2
+    with_cache = sequence_length
+    return without_cache, with_cache
+
+
 def compare_full_and_cached():
     torch.manual_seed(0)
     model = CachedSelfAttention(d_model=16).eval()
@@ -49,16 +56,24 @@ def compare_full_and_cached():
         full_output = model.full(x)
         cache = None
         incremental = []
+        cache_lengths = []
         for position in range(x.size(1)):
             output, cache = model.step(x[:, position : position + 1], cache)
             incremental.append(output)
+            cache_lengths.append(cache[0].size(1))
+            assert cache[0].size(1) == position + 1
+            assert cache[0].shape == cache[1].shape
         cached_output = torch.cat(incremental, dim=1)
 
     max_difference = (full_output - cached_output).abs().max().item()
     assert max_difference < 1e-6
+    without_cache, with_cache = projection_token_work(x.size(1))
     print("full output:", full_output.shape)
     print("cached output:", cached_output.shape)
     print("final K/V cache:", cache[0].shape, cache[1].shape)
+    print("cache length after each step:", cache_lengths)
+    print("projected token positions without/with cache:", without_cache, with_cache)
+    print("KV cache removes repeated projections; current Q still scans all history K/V.")
     print("max difference:", max_difference)
     return max_difference
 

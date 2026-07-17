@@ -60,6 +60,21 @@ class TopKMoE(nn.Module):
         )
 
 
+def router_diagnostics(moe, x):
+    tokens = x.reshape(-1, x.size(-1))
+    probabilities = torch.softmax(moe.router(tokens).float(), dim=-1)
+    top_weights, top_indices = probabilities.topk(moe.top_k, dim=-1)
+    normalized_weights = top_weights / top_weights.sum(dim=-1, keepdim=True)
+    entropy = -(
+        probabilities * probabilities.clamp_min(1e-9).log()
+    ).sum(dim=-1).mean()
+    top1_counts = torch.bincount(
+        top_indices[:, 0],
+        minlength=moe.num_experts,
+    )
+    return probabilities, normalized_weights, top_indices, entropy, top1_counts
+
+
 def run_demo():
     torch.manual_seed(0)
     x = torch.randn(2, 6, 16)
@@ -71,10 +86,22 @@ def run_demo():
     assert sum(counts) == 2 * 6 * 2
     assert torch.isfinite(auxiliary_loss)
 
+    probabilities, top_weights, _, entropy, top1_counts = router_diagnostics(moe, x)
+    assert torch.allclose(top_weights.sum(-1), torch.ones(top_weights.size(0)))
+    total_loss = output.square().mean() + 0.01 * auxiliary_loss
+    total_loss.backward()
+    assert moe.router.weight.grad is not None
+    assert torch.isfinite(moe.router.weight.grad).all()
+
     print("input/output:", x.shape, output.shape)
     print("top-2 routes for batch 0:\n", routes[0])
     print("expert assignments:", counts)
     print("load-balance auxiliary loss:", auxiliary_loss.item())
+    print("uniform balance-loss reference: 1.0")
+    print("router mean entropy:", entropy.item(), "max:", torch.log(torch.tensor(4.0)).item())
+    print("top-1 expert counts:", top1_counts.tolist())
+    print("router gradient norm:", moe.router.weight.grad.norm().item())
+    print("router probability row sums:", probabilities.sum(-1)[:3].tolist())
 
 
 if __name__ == "__main__":

@@ -37,6 +37,9 @@ V_cache: [B, Hkv, T, Dh]
 python -m labs.lab06_kv_cache
 ```
 
+实验逐步断言 cache length 从 1 增长到 T，并打印有无 cache 时需要执行 K/V projection 的
+token position 数 `T(T+1)/2` 与 `T`。
+
 若结果不一致，优先检查：
 
 - cache 拼接维度。
@@ -112,6 +115,9 @@ K/V projection 只产生 `Hkv` 个 head。计算 attention 前，每个 K/V head
 ```bash
 python -m labs.lab10_mha_mqa_gqa
 ```
+
+实验同时比较三种结构的参数量、compact cache elements/token，以及教学用逻辑展开后的 K
+元素数，避免把 `repeat_interleave` 误认为真实 cache 必须复制。
 
 ## FlashAttention
 
@@ -254,6 +260,197 @@ query heads 4,5,6,7 -> KV head 1
 | GQA/MQA | 训练与推理结构 | 减少 K/V heads 和 cache |
 
 三者可以同时使用，不是互斥方案。
+
+## 为什么缓存 K/V 而不是 Hidden 或 Logits
+
+每一层 Attention 需要该层历史 token 经过该层 `k_proj/v_proj` 的结果。最终 hidden 或 logits
+无法替代，因为下一 token 在每一层都要读取不同层的历史表示：
+
+```text
+layer 0 cache: K0/V0
+layer 1 cache: K1/V1
+...
+layer L-1 cache: KL-1/VL-1
+```
+
+Q 只属于当前 query。历史 Q 在它产生输出后不会被未来 token 读取，因此不需要缓存。未来
+token 会生成自己的 Q，再与所有历史 K 配对。
+
+## Cached 与 Full 等价的归纳直觉
+
+对位置 `t`，causal full attention 只能读取 `0..t` 的 K/V。Cached decode 在第 `t` 步也恰好
+保存 `0..t`：
+
+```text
+K_cache_t = concat(K_0, ..., K_t)
+V_cache_t = concat(V_0, ..., V_t)
+```
+
+若以下条件一致：
+
+- 每个 token 的 hidden 输入一致。
+- position encoding/position id 一致。
+- LayerNorm、projection 权重一致。
+- Dropout 关闭。
+- Mask 可见集合一致。
+
+则第 `t` 步 score 与 full forward 第 `t` 行相同，输出也相同。这个条件是逐层递归的：前一层
+cached 输出一致，才能保证下一层输入一致。
+
+## `torch.cat` Cache 的隐藏成本
+
+Lab 便于教学地使用：
+
+```python
+key = torch.cat([old_key, new_key], dim=sequence_dim)
+```
+
+每次 `cat` 都可能分配新 Tensor 并复制全部历史。生成 `T` 步时，仅 cache append 就可能产生
+平方级复制量。生产实现通常：
+
+- 预分配 `[B,Hkv,max_len,Dh]`，按 position 原地写入。
+- 使用分页/Paged KV Cache，把逻辑序列映射到固定大小 block。
+- 使用专门 kernel 接受 cache pointer 与当前位置。
+
+因此 Lab 验证的是数学等价性，不代表高性能 cache 管理方式。
+
+## RoPE 与 Cache Position
+
+若 RoPE 在写入 cache 前作用于 K，则缓存的是已经按绝对位置旋转的 K。新 token 位置必须从
+`cache_length` 开始：
+
+```python
+position = past_key.size(sequence_dim)
+q = apply_rope(q, position)
+k_new = apply_rope(k_new, position)
+```
+
+常见错误是 decode 每步输入长度为 1，于是位置也总取 0。Shape 和 cache 长度都正常，但
+Attention 相位错误，输出与 full forward 不一致。
+
+## GQA 的投影参数量
+
+设：
+
+```text
+Hq query heads
+Hkv KV heads
+Dh = D / Hq
+K/V output width = Hkv * Dh
+```
+
+忽略 bias：
+
+```text
+Wq: D * D
+Wk: D * (Hkv * Dh)
+Wv: D * (Hkv * Dh)
+Wo: D * D
+```
+
+总参数：
+
+$$
+2D^2 + 2D(H_{kv}D_h)
+$$
+
+MHA 中 `Hkv=Hq`，恢复 `4D^2`。MQA 中 `Hkv=1`，K/V 投影参数和 cache 都显著减少。
+FFN、embedding 等参数不受影响，所以不能把 Attention 参数比例直接当作全模型压缩比例。
+
+## Repeat、Broadcast 与物理 Cache
+
+教学实现：
+
+```python
+expanded = compact_kv.repeat_interleave(repeats, dim=1)
+```
+
+逻辑上得到 `[B,Hq,T,Dh]`，便于复用普通 MHA 公式。但若真正物化 expanded K/V，会抵消
+cache 内存优势。生产 GQA kernel 直接让多个 Q head 索引同一个 compact KV head：
+
+```text
+kv_head = query_head // queries_per_kv_head
+```
+
+应缓存 compact `[B,Hkv,T,Dh]`，只在计算语义上共享，不在存储上复制。
+
+## Decode 为什么常受内存带宽限制
+
+单步 decode 的 Q 长度为 1。每层需要读取全部历史 K/V，但小矩阵计算并不容易占满 GPU：
+
+```text
+read cache: O(T * Hkv * Dh)
+attention compute: O(T * Hq * Dh)
+```
+
+随着 `T` 增长，读取 cache 的字节数线性增长。GQA/MQA 减少 Hkv，直接减少读流量，因此收益
+不只体现在“能放更大 batch”，还可能提高 tokens/s。实际速度仍取决于 kernel 是否避免
+物化 expanded KV。
+
+## Batch、Beam 与 Cache 内存
+
+公式中的 batch 应使用实际活跃序列数。Beam Search 宽度 `W` 在简单实现中近似把 batch
+扩大 `W` 倍：
+
+$$
+cache\ bytes\propto B\times W\times T
+$$
+
+共享 prompt 前缀、copy-on-write 或 block table 可以减少物理复制，但 beam 分叉后的 token
+仍需独立 cache。Beam 重排时至少要同步：
+
+```text
+token sequences
+sequence lengths
+beam scores
+K/V block mapping or tensors
+finished flags
+```
+
+## Cache Quantization 与 Sliding Window
+
+进一步降低内存的策略包括：
+
+- KV cache 使用更低位宽，并保存必要 scale。
+- Sliding-window attention 只保留最近 `W` 个 token。
+- 对不同层或 token 使用选择性压缩/淘汰。
+
+这些方法会改变数值或可见上下文，不再是纯粹“避免重复计算”的完全等价优化。使用 sliding
+window 时，mask 与 position 仍按绝对位置处理，cache 存储长度则被限制。
+
+## 可运行的 Cache 计算器
+
+```python
+def kv_cache_mib(
+    layers,
+    batch,
+    kv_heads,
+    sequence_length,
+    head_dim,
+    bytes_per_element=2,
+):
+    elements = (
+        2 * layers * batch * kv_heads * sequence_length * head_dim
+    )
+    return elements * bytes_per_element / (1024**2)
+
+assert kv_cache_mib(32, 1, 8, 4096, 128) == 512
+print("MHA:", kv_cache_mib(32, 1, 32, 4096, 128), "MiB")
+print("GQA:", kv_cache_mib(32, 1, 8, 4096, 128), "MiB")
+print("MQA:", kv_cache_mib(32, 1, 1, 4096, 128), "MiB")
+```
+
+实际服务还要加模型权重、activation、临时 workspace、allocator 碎片和请求调度开销。
+
+## 本章调试不变量
+
+1. 每层都有独立 K/V cache，cache sequence length 等于已处理 token 数。
+2. Append/write 发生在 sequence 轴，K/V head 轴保持 `Hkv`。
+3. 新 token position id 从 cache length 继续，不重置为 0。
+4. Compact cache 不因 GQA head sharing 被物理扩成 `Hq` 份。
+5. Cached/full 比较时关闭 dropout，并比较每层或每步最大误差。
+6. Beam reorder 同步处理 token、score、length、finished 和 cache。
+7. 内存估算使用实际 dtype 字节数、层数、活跃 batch/beam 和最大序列长度。
 
 ## 常见错误
 

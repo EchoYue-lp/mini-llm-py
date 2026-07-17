@@ -339,6 +339,220 @@ LoRA 更新是否仍接近 0，或变得异常大。
 | Task 指标不升 | Loss 与业务字段不对齐、数据边界不足 |
 | JSON 合法率下降 | 生成配置或结构化约束不足 |
 
+## Prompt Mask 的精确索引推导
+
+设未 shift 的完整 token 序列长度为 `L`，prompt token 数为 `P`：
+
+```text
+original index: 0, 1, ..., P-1, P, ..., L-1
+                              ^ assistant answer begins
+```
+
+Shift 后：
+
+```text
+inputs  = batch[:, :-1]  # original positions 0..L-2
+targets = batch[:, 1:]   # original positions 1..L-1
+```
+
+所以 target 列 `j` 对应 original position `j+1`。项目构造：
+
+```python
+positions = mx.arange(1, targets.shape[1] + 1)
+after_prompt = positions >= prompt_length
+before_padding = positions < real_length
+mask = after_prompt & before_padding
+```
+
+边界含义：
+
+- `>= P`：第一个 assistant answer token 参与监督。
+- `< L`：最后一个真实 token 参与，位置 `L` 的第一个 PAD 不参与。
+
+若写成 `positions > P`，会漏掉答案首 token；若写成 `positions <= L`，会把第一个 PAD target
+算入 loss。
+
+## Chat Template 是训练协议的一部分
+
+`tokenize_chat_records()` 分别调用同一个 tokenizer template：
+
+```python
+all_tokens = apply_chat_template(system + user + assistant)
+prompt_tokens = apply_chat_template(
+    system + user,
+    add_generation_prompt=True,
+)
+```
+
+`prompt_length=len(prompt_tokens)` 只有在两次 template 的 assistant 起始边界一致时才正确。
+训练、adapter 推理和评测必须统一：
+
+- system prompt 文本。
+- role token 与 assistant generation prefix。
+- `enable_thinking`。
+- BOS/EOS 添加规则。
+- tokenizer revision。
+
+模板变化可能不报 shape 错，但 prompt mask 会错位，推理输入分布也会改变。
+
+代码会在 `prompt_length >= len(all_tokens)` 时拒绝样本，这表示答案被最大长度完全截断。部分
+截断仍可能发生，因此还应统计每条答案保留比例，而不是只检查“至少剩一个 token”。
+
+## 空监督 Mask 为什么必须立即失败
+
+Loss：
+
+$$
+L=\frac{\sum_i m_i\ell_i}{\sum_i m_i}
+$$
+
+若 `sum(mask)=0`，分母为零，会产生 NaN。可能原因：
+
+- Assistant 内容为空。
+- Prompt 占满最大长度。
+- Off-by-one 让所有答案 token 被排除。
+- Batch length 元数据错误。
+
+训练前应断言：
+
+```python
+supervised_tokens = mask.sum()
+if int(supervised_tokens.item()) == 0:
+    raise ValueError("batch contains no supervised assistant token")
+```
+
+只在出现 NaN 后降低学习率不会解决空 mask。
+
+## 梯度累积何时等价于大 Batch
+
+设 K 个 microbatch 的 loss 都是样本/Token 平均 `L_k`。项目累加梯度后除以 K：
+
+$$
+g=\frac{1}{K}\sum_{k=1}^{K}\nabla L_k
+$$
+
+当每个 microbatch 的有效 token 数相同，这等价于把它们合成一个大 batch 后对所有 token
+平均。若有效 token 数 `N_k` 不同，严格 token-weighted 大 batch 梯度应是：
+
+$$
+g_{token}=\frac{\sum_kN_k\nabla L_k}{\sum_kN_k}
+$$
+
+当前 MLX 训练默认 batch size 1，答案长度不同，所以 accumulation 大于 1 时实际更接近
+“每个 microbatch 等权”，不完全是“每个 token 等权”。若需要严格等价，应累加 loss sum
+或用 supervised token 数给梯度加权。
+
+Dropout mask、随机路由、BatchNorm 和每次更新的 scheduler 时机也会破坏完全等价。本项目
+没有 BatchNorm，但 LoRA dropout 若非零仍会带来随机差异。
+
+## Gradient Norm 的口径
+
+项目记录当前 microbatch 的 gradient L2 norm：
+
+```text
+sqrt(sum over all trainable tensors and elements g^2)
+```
+
+当使用 gradient accumulation 时，它不是最终 averaged accumulated gradient norm。解释曲线
+时必须知道记录点位于：
+
+- 单 microbatch 梯度。
+- 累积和。
+- 除以 K 后。
+- 梯度裁剪前或后。
+
+当前代码没有梯度裁剪。若增加 clipping，应同时记录 clip 前 norm 和 clip 后实际更新，避免
+“norm 看似稳定”只是因为每步都被截断。
+
+## MLX Lazy Execution 与 `mx.eval`
+
+MLX 运算通常是 lazy 的：Python 表达式先构建计算，直到值被需要或调用 `mx.eval(...)` 才真正
+执行。训练循环中的：
+
+```python
+mx.eval(model.parameters(), optimizer.state, loss, supervised_tokens, grad_norm)
+```
+
+同时承担：
+
+- 触发 forward/backward/update 计算。
+- 确保 optimizer state 已物化。
+- 让计时与内存指标对应实际工作。
+
+若在计时区间内只构建 lazy graph、不同步就读时间，会高估吞吐。若遗漏 optimizer state 的
+eval，也可能让更新延迟到后续操作，增加调试难度。
+
+## 当前 Adapter Snapshot 不是精确 Resume Checkpoint
+
+项目保存的 `*.safetensors` 只包含 trainable LoRA 权重。它们适合：
+
+- 推理加载。
+- 比较 periodic/best/final adapter。
+- 作为新实验初始化点。
+
+但不包含：
+
+- Adam 一阶/二阶动量。
+- Optimizer step。
+- 当前数据迭代器/RNG 状态。
+- 已累积但尚未 update 的梯度。
+
+因此当前 MLX LoRA 流程没有实现“中断后逐步精确继续”的完整 resume。文档中讨论 optimizer
+state 是在说明完整 checkpoint 应具备什么，不能把 adapter snapshot 称为完整训练 checkpoint。
+
+## Early Stopping 的单位是验证次数
+
+`patience=5` 表示连续 5 次 validation check 没改善，而不是 5 个训练 iteration。若：
+
+```text
+steps_per_eval = 10
+```
+
+则最早会容忍约 50 个 iteration 无改善。改变验证频率会同时改变 early stopping 响应速度和
+计算开销，实验记录必须保存二者。
+
+小验证集本身方差很大。严格实验可设置最小改善量 `min_delta`、多 seed 重复，或用任务主
+指标与 validation loss 联合判断。
+
+## Best Checkpoint 的选择指标泄漏
+
+只要某个指标参与 checkpoint 选择，它就属于 validation 决策流程，不能再把同一数据上的
+结果当作无偏 test。若最终部署按 exact match 选 best adapter，则应：
+
+```text
+train -> 梯度
+validation exact match -> 选 checkpoint
+test exact match -> 一次最终报告
+```
+
+不能先按 validation loss 选一次，再看 test exact match 不满意后改用另一个 checkpoint，仍
+声称 test 未参与决策。
+
+## 训练状态审计代码
+
+```python
+def audit_training_state(model, gradients, supervised_tokens):
+    trainable = dict(tree_flatten(model.trainable_parameters()))
+    gradient_map = dict(tree_flatten(gradients))
+    assert int(supervised_tokens.item()) > 0
+    assert trainable
+    assert set(trainable) == set(gradient_map)
+    for name, value in gradient_map.items():
+        assert mx.all(mx.isfinite(value)).item(), f"non-finite gradient: {name}"
+```
+
+进一步可在训练前后计算冻结基座参数哈希或抽样差值，证明只有 adapter 被更新。
+
+## 本章调试不变量
+
+1. Prompt 与 full chat 使用同一 template，答案起始位置可打印验证。
+2. Shift 后 mask 描述 original target positions `1..L-1`。
+3. 每个训练 batch 至少有一个 supervised token。
+4. 明确 gradient accumulation 是 microbatch-weighted 还是 token-weighted。
+5. `mx.eval` 覆盖参数、optimizer state 和被记录指标。
+6. Adapter snapshot 与完整 resumable checkpoint 明确区分。
+7. Early stopping patience、eval frequency、best metric 与 test 隔离全部记录。
+
 ## 常见错误
 
 1. Prompt mask 与 next-token shift 错一位。

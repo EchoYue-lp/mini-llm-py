@@ -65,10 +65,13 @@ Copy task 让 target 等于 source，没有语言歧义，适合先验证：
 - causal mask。
 - cross-attention。
 - next-token shift。
+- 随机均匀预测基线 `log(V)` 与训练 loss 的关系。
 
 ```bash
 python -m labs.lab04_tiny_copy_task --steps 400
 ```
+
+实验会直接断言 `decoder_input[:,1:] == labels[:,:-1]`，避免只凭 loss 下降判断 shift 正确。
 
 ## 完整翻译流程
 
@@ -233,6 +236,182 @@ n-gram 重合。二者相关但不等价：
 4. 过长样本是否大量截断。
 5. Train/validation 是否泄漏。
 6. Tokenizer 是否与 checkpoint 一致。
+
+## 条件概率分解
+
+翻译模型学习：
+
+$$
+P(y_1,\ldots,y_T\mid x_1,\ldots,x_S)
+=\prod_{t=1}^{T}P(y_t\mid y_{<t},x_{1:S})
+$$
+
+Encoder memory 表示条件 `x`，decoder causal self-attention 表示 `y_{<t}`，cross-attention
+把二者结合。训练 loss 是各目标 token 负对数概率之和或平均：
+
+$$
+L=-\sum_t\log P(y_t\mid y_{<t},x)
+$$
+
+这解释了 Decoder 为什么同时需要两种 Attention：只有 self-attention 会变成无条件语言
+模型；只有 cross-attention 则无法利用已生成 target 的语法与上下文。
+
+## Cross-Attention 的逐元素计算
+
+Decoder hidden 产生 query，encoder memory 产生 key/value：
+
+```text
+decoder hidden: [B,T,D]
+memory:         [B,S,D]
+Q:              [B,H,T,Dh]
+K/V:            [B,H,S,Dh]
+score:          [B,H,T,S]
+```
+
+对 target 位置 `t`、source 位置 `s`：
+
+$$
+score_{t,s}=\frac{q_t\cdot k_s}{\sqrt{D_h}}
+$$
+
+每个 target query 沿 source 轴 `S` 做 Softmax，再汇总 encoder Value。Cross mask 的 key 轴
+必须对应 source padding；把 target mask 传进去，在 `S==T` 的 batch 中甚至可能不报错，却
+会屏蔽错误位置。
+
+## Teacher Forcing 为什么能并行
+
+训练时完整 target 已知，但 causal mask 保证位置 `t` 只读取 `<=t` 的 decoder input。所有
+位置的条件历史可以一次放入矩阵：
+
+```text
+decoder_input = [BOS, y1, y2, ..., y(T-1)]
+labels        = [y1,  y2, y3, ..., yT]
+```
+
+并行计算不等于允许看未来。若关闭 causal mask，位置 `t` 可直接读取包含答案的后续 target
+embedding，训练 loss 会虚假下降，生成时却无法复现该信息路径。
+
+Exposure bias 描述训练使用真实历史、推理使用模型历史的分布差异。它是真实问题，但不是
+看到生成错误就能唯一归因的诊断标签；数据、搜索、校准和模型容量也可能是原因。
+
+## 特殊 Token 与截断边界
+
+一个目标序列通常需要：
+
+```text
+[BOS, content..., EOS]
+```
+
+若在截断时简单取前 `max_len` 个 token，可能把 EOS 截掉，使模型看不到停止监督。更稳妥的
+策略是预留 EOS 位置：
+
+```python
+content = content[: max_len - 2]
+target = [bos_id] + content + [eos_id]
+```
+
+本项目预处理、collate 和训练脚本之间必须约定由谁添加特殊 token。若 tokenizer 已自动加
+BOS/EOS，数据代码再加一次，会出现重复边界。
+
+## Token 平均与 Sequence 平均
+
+`CrossEntropyLoss(ignore_index=PAD)` 默认对所有有效 target token 求平均。长句贡献更多
+token 项，但每个 token 权重相同。另一种做法是先计算每句平均，再对 batch 求平均，此时短句
+和长句权重相同。
+
+两种目标不同，不能只比较标量 loss 而忽略 reduction。日志中若用“batch loss 的平均”汇总
+不同有效 token 数的 batch，也可能产生偏差。严格 corpus loss 应累计：
+
+```text
+sum(valid token NLL) / sum(valid token count)
+```
+
+## Beam Search 的分数
+
+序列概率连乘会快速下溢，所以 Beam 累加 log probability：
+
+$$
+score(y_{1:t})=\sum_{i=1}^{t}\log P(y_i\mid y_{<i},x)
+$$
+
+因为每个 log probability 小于等于 0，长序列天然累加更多负数，容易偏向过短输出。项目
+使用近似长度惩罚：
+
+```text
+normalized_score = log_prob / length^alpha
+```
+
+`alpha` 不是概率模型参数，而是搜索启发式。比较实验时必须固定 beam width、length penalty、
+最大长度和停止条件，否则 BLEU 变化可能来自解码器而非模型。
+
+## Encoder 复用在当前代码中的差异
+
+`beam_search_translate()` 手动执行一次 encoder，并在所有 beam/step 中复用 memory。这符合
+理想推理路径。
+
+`greedy_translate()` 为了代码简单，每步调用完整 `model(src,tgt,...)`，因此会重复运行
+encoder。输出语义仍正确，但计算浪费。把它优化为生产路径时，应拆出：
+
+```python
+memory = encode(src, src_mask)       # once
+next_logits = decode(tgt, memory)    # every step
+```
+
+进一步还可缓存 decoder self-attention K/V；cross-attention 的 encoder K/V 也可预投影复用。
+
+## 一批数据的可执行 Shape Trace
+
+```python
+src, tgt = next(iter(train_loader))
+src = src.to(device)
+tgt = tgt.to(device)
+
+tgt_input = tgt[:, :-1]
+labels = tgt[:, 1:]
+src_mask = create_padding_mask(src, pad_token_id)
+tgt_mask = combine_masks(
+    create_causal_mask(tgt_input.size(1), src.device),
+    create_padding_mask(tgt_input, pad_token_id),
+)
+cross_mask = create_padding_mask(src, pad_token_id)
+
+logits, attention = model(
+    src,
+    tgt_input,
+    src_mask=src_mask,
+    tgt_mask=tgt_mask,
+    cross_mask=cross_mask,
+)
+
+assert logits.shape[:2] == labels.shape
+assert src_mask.shape == (src.size(0), 1, 1, src.size(1))
+assert cross_mask.size(-1) == src.size(1)
+```
+
+## 从零诊断翻译训练
+
+按以下顺序能减少无效调参：
+
+1. 检查随机样本的 source/target 文本与 id 是否对齐。
+2. 在极小数据上过拟合一个 batch，确认 loss 能接近零。
+3. 关闭 dropout，固定 seed，验证 train/eval forward 可重复。
+4. 打印三种 mask 的一条样本，确认可见位置。
+5. Greedy 解码 copy task，确认 BOS/EOS 和停止逻辑。
+6. 再扩大数据并比较 validation token NLL 与生成样例。
+7. 最后才调整 beam、长度惩罚和模型规模。
+
+如果连一个 batch 都无法过拟合，优先寻找数据、shift、mask、优化器或实现错误，而不是增加
+层数。
+
+## 本章调试不变量
+
+1. `src/tgt` batch size 相同，source/target 样本一一对应。
+2. `tgt_input.shape == labels.shape`，内容严格错开一位。
+3. Target self-mask key 轴是 target length，cross-mask key 轴是 source length。
+4. Encoder memory 在生成过程中不随 target step 改变。
+5. BOS/EOS 添加一次且 id 与 tokenizer/checkpoint 一致。
+6. Loss 与 BLEU/生成样例分别记录，不能互相替代。
+7. Beam 对 token 序列、累计分数和 cache 的重排保持同步。
 
 ## 动手练习
 

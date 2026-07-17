@@ -23,5 +23,5 @@ test:
 	$(PYTHON) -m pytest
 
 check:
-	$(PYTHON) -m compileall -q models utils scripts labs tokenization tests finetuning inference evaluation check_cloud_env.py
+	$(PYTHON) -m compileall -q models utils scripts foundations labs tokenization tests finetuning inference evaluation check_cloud_env.py
 	$(PYTHON) -m pytest

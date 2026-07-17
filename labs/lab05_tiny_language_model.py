@@ -1,6 +1,7 @@
 """Lab 05: train a decoder-only Transformer on a repeating token rule."""
 
 import argparse
+import math
 
 import torch
 import torch.nn.functional as F
@@ -18,11 +19,12 @@ def make_pattern_batch(batch_size, seq_len, vocab_size, device="cpu"):
 
 def generate(model, prompt, new_tokens):
     tokens = prompt.clone()
-    for _ in range(new_tokens):
-        mask = create_causal_mask(tokens.size(1), device=tokens.device)
-        logits, _ = model(tokens, mask)
-        next_token = logits[:, -1].argmax(dim=-1, keepdim=True)
-        tokens = torch.cat([tokens, next_token], dim=1)
+    with torch.no_grad():
+        for _ in range(new_tokens):
+            mask = create_causal_mask(tokens.size(1), device=tokens.device)
+            logits, _ = model(tokens, mask)
+            next_token = logits[:, -1].argmax(dim=-1, keepdim=True)
+            tokens = torch.cat([tokens, next_token], dim=1)
     return tokens
 
 
@@ -40,10 +42,12 @@ def train_language_model(steps=100, device="cpu"):
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-3)
     losses = []
+    random_guess_loss = math.log(vocab_size)
 
     model.train()
     for step in range(1, steps + 1):
         inputs, labels = make_pattern_batch(32, 8, vocab_size, device)
+        assert torch.equal((inputs + 1) % vocab_size, labels)
         mask = create_causal_mask(inputs.size(1), device=device)
         logits, _ = model(inputs, mask)
         loss = F.cross_entropy(logits.flatten(0, 1), labels.flatten())
@@ -60,6 +64,9 @@ def train_language_model(steps=100, device="cpu"):
     prompt = torch.tensor([[3, 4, 5]], device=device)
     result = generate(model, prompt, new_tokens=6)
     print("generated:", result[0].tolist())
+    print("expected rule: next_token = (current_token + 1) % vocab_size")
+    print("random-uniform CE baseline log(V):", round(random_guess_loss, 4))
+    print("first/final training loss:", round(losses[0], 4), round(losses[-1], 4))
     return model, losses, result
 
 

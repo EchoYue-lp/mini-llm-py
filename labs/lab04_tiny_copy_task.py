@@ -1,6 +1,7 @@
 """Lab 04: train a tiny encoder-decoder Transformer to copy token sequences."""
 
 import argparse
+import math
 
 import torch
 import torch.nn.functional as F
@@ -26,13 +27,14 @@ def make_copy_batch(batch_size, content_length, vocab_size, device="cpu"):
 
 def greedy_copy(model, source, max_new_tokens):
     generated = torch.tensor([[BOS_ID]], device=source.device)
-    for _ in range(max_new_tokens):
-        mask = create_causal_mask(generated.size(1), device=source.device)
-        logits, _ = model(source, generated, tgt_mask=mask)
-        next_token = logits[:, -1].argmax(dim=-1, keepdim=True)
-        generated = torch.cat([generated, next_token], dim=1)
-        if next_token.item() == EOS_ID:
-            break
+    with torch.no_grad():
+        for _ in range(max_new_tokens):
+            mask = create_causal_mask(generated.size(1), device=source.device)
+            logits, _ = model(source, generated, tgt_mask=mask)
+            next_token = logits[:, -1].argmax(dim=-1, keepdim=True)
+            generated = torch.cat([generated, next_token], dim=1)
+            if next_token.item() == EOS_ID:
+                break
     return generated[0, 1:].tolist()
 
 
@@ -51,6 +53,7 @@ def train_copy_task(steps=400, device="cpu"):
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-3)
     losses = []
+    random_guess_loss = math.log(vocab_size)
 
     model.train()
     for step in range(1, steps + 1):
@@ -61,6 +64,9 @@ def train_copy_task(steps=400, device="cpu"):
             device=device,
         )
         target_mask = create_causal_mask(decoder_input.size(1), device=device)
+        assert decoder_input.shape == labels.shape
+        assert torch.equal(decoder_input[:, 1:], labels[:, :-1])
+        assert torch.count_nonzero(target_mask[0, 0].triu(1)) == 0
         logits, _ = model(source, decoder_input, tgt_mask=target_mask)
         loss = F.cross_entropy(logits.flatten(0, 1), labels.flatten())
 
@@ -77,6 +83,9 @@ def train_copy_task(steps=400, device="cpu"):
     prediction = greedy_copy(model, example, max_new_tokens=6)
     print("source:    ", example[0].tolist())
     print("prediction:", prediction)
+    print("random-uniform CE baseline log(V):", round(random_guess_loss, 4))
+    print("first/final training loss:", round(losses[0], 4), round(losses[-1], 4))
+    print("decoder input and labels are the same target shifted by one token")
     return model, losses, prediction
 
 

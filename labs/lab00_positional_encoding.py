@@ -22,6 +22,19 @@ def sinusoidal_position_encoding(seq_len, d_model, device="cpu"):
     return encoding
 
 
+def shift_sinusoidal_pair(pair, delta_angle):
+    """Move one [sin(angle), cos(angle)] pair by ``delta_angle``."""
+    sine, cosine = pair
+    delta_sine = torch.sin(torch.as_tensor(delta_angle, device=pair.device))
+    delta_cosine = torch.cos(torch.as_tensor(delta_angle, device=pair.device))
+    return torch.stack(
+        (
+            sine * delta_cosine + cosine * delta_sine,
+            cosine * delta_cosine - sine * delta_sine,
+        )
+    )
+
+
 class LearnedPositionEmbedding(nn.Module):
     def __init__(self, max_len, d_model):
         super().__init__()
@@ -39,7 +52,8 @@ def run_demo():
     tokens = torch.randn(2, 6, 8)
     sinusoidal = sinusoidal_position_encoding(6, 8)
     with_sinusoidal = tokens + sinusoidal.unsqueeze(0)
-    with_learned = LearnedPositionEmbedding(16, 8)(tokens)
+    learned = LearnedPositionEmbedding(16, 8)
+    with_learned = learned(tokens)
 
     q_or_k = torch.randn(2, 4, 6, 8)
     with_rope = apply_rope(q_or_k)
@@ -49,10 +63,21 @@ def run_demo():
     assert with_rope.shape == q_or_k.shape
     assert torch.allclose(sinusoidal[0, 0::2], torch.zeros(4))
     assert torch.allclose(sinusoidal[0, 1::2], torch.ones(4))
+    # The first frequency is 1 radian per position. Its pair at position 3 can
+    # be derived from position 1 by a rotation of 2 radians.
+    shifted_pair = shift_sinusoidal_pair(sinusoidal[1, :2], delta_angle=2.0)
+    assert torch.allclose(shifted_pair, sinusoidal[3, :2], atol=1e-6)
+    assert sum(parameter.numel() for parameter in learned.parameters()) == 16 * 8
 
     print("sinusoidal PE:", sinusoidal.shape, "fixed, added to token embeddings")
-    print("learned PE output:", with_learned.shape, "trainable lookup table")
+    print(
+        "learned PE output:",
+        with_learned.shape,
+        "trainable parameters:",
+        16 * 8,
+    )
     print("RoPE output:", with_rope.shape, "rotates Q/K instead of adding to x")
+    print("sin/cos pair shift check: position 1 + delta 2 == position 3")
 
 
 if __name__ == "__main__":

@@ -76,6 +76,9 @@ python -m labs.lab02_multi_head_attention
 
 建议修改 `d_model` 和 `num_heads`，验证合法与非法组合。
 
+实验还会打印 split 后 Tensor 的 stride/contiguous 状态，以及包含 bias 的 Q/K/V/O 精确
+参数量，用于区分“逻辑轴重排”和“物理内存布局”。
+
 ## 对照源码
 
 - `labs/lab02_multi_head_attention.py`
@@ -205,6 +208,192 @@ output = out_proj(merge_heads(context))
 ```
 
 阅读实现时逐行标注 shape，能快速发现 transpose 或 reshape 错误。
+
+## 一个大投影如何等价于多组 Head 投影
+
+实现通常不是创建 `H` 个独立 `nn.Linear(D,Dh)`，而是一次计算：
+
+```python
+q = q_proj(x)  # [B,T,D]
+q = q.view(B, T, H, Dh)
+```
+
+从权重行的角度，`Wq: [D,D]` 可以按输出通道分块：
+
+```text
+Wq = concat(Wq_head_0, ..., Wq_head_H-1)
+每块 shape [Dh,D]
+```
+
+因此一次大 GEMM 与多次小投影在数学上可对应，但大矩阵乘法通常更利于硬件吞吐。拆 head
+只是重新解释输出通道，不会在此时复制参数。
+
+注意：这不表示不同 head 正交或独立。所有 head 都读取同一个输入 `x`，训练目标也共同
+作用于最终输出。
+
+## Stride、Transpose 与 Contiguous
+
+Tensor 除 shape 外还有 stride，描述每个轴移动一步要跨过多少个存储元素。示例：
+
+```python
+x = torch.arange(2 * 3 * 4).view(2, 3, 4)
+y = x.transpose(1, 2)
+print(x.shape, x.stride())
+print(y.shape, y.stride())
+```
+
+`transpose` 通常只创建 view，底层数据没有按新顺序复制，因此 `y` 的逻辑相邻元素在内存中
+可能不相邻。`view` 要求新 shape 能由现有 stride 表示；合并 head 时常见写法：
+
+```python
+context = context.transpose(1, 2).contiguous()
+output = context.view(B, T, H * Dh)
+```
+
+`.contiguous()` 会按当前逻辑顺序生成连续副本。`reshape` 在可能时返回 view，不可能时会
+复制，因此更宽容，但也可能隐藏一次额外内存开销。教学实现显式写 `contiguous().view()`
+更容易看清语义和成本。
+
+## Output Projection 不只是恢复 Shape
+
+Merge 后：
+
+```text
+concat(head_0, ..., head_H-1): [B,T,D]
+```
+
+如果直接返回，来自不同 head 的通道只是并排放置。`Wo: [D,D]` 允许每个输出特征读取所有
+head 的通道：
+
+$$
+y_{b,t,m}=\sum_{h,d} context_{b,h,t,d}\,W^O_{m,(h,d)}
+$$
+
+它同时完成：
+
+1. 跨 head 信息混合。
+2. 把输出映射回残差主干使用的表示基底。
+3. 保持 `[B,T,D]`，使结果能与输入相加。
+
+因此 `out_proj` 不是可随意省略的 reshape 辅助层。
+
+## 参数量与 FLOPs 分开计算
+
+参数量忽略 bias：
+
+```text
+Q/K/V/O projections = 4D^2
+```
+
+Self-Attention 长度为 `T` 时，主要乘法量级：
+
+```text
+Q/K/V projection: 3 * B * T * D^2
+QK^T:             B * T^2 * D
+weights @ V:      B * T^2 * D
+output projection:B * T * D^2
+```
+
+合计近似：
+
+```text
+4BTD^2 + 2BT^2D
+```
+
+这说明：
+
+- 短序列、大 `D` 时 projection 可能占主要计算。
+- 长序列时 `T^2D` 项迅速主导。
+- 增加 head 数但保持 `D` 不变，理论乘法总量近似不变；实际速度仍受 kernel shape、并行度
+  和内存布局影响。
+
+Cross-Attention 将二次项改为 `Ttarget * Ssource * D`。
+
+## Self-Attention 的 Q/K/V 长度不变量
+
+本项目 `MultiHeadAttention.forward(Q,K,V,mask)` 允许三者来源不同。应检查：
+
+```text
+Q batch == K batch == V batch
+K length == V length
+Q/K/V hidden dimension == D
+```
+
+但不要求：
+
+```text
+Q length == K length
+```
+
+Self-attention 恰好相等，cross-attention 可以不同。输出 token 数永远跟随 Q：
+
+```text
+output shape = [B,Tq,D]
+```
+
+因为每个 query 产生一个输出；K/V 只提供被读取的 memory。
+
+## 逐行 Shape Instrumentation
+
+调试时可以把 shape 断言直接写进最小实现：
+
+```python
+def split_heads(x, heads):
+    batch, seq, d_model = x.shape
+    assert d_model % heads == 0
+    head_dim = d_model // heads
+    result = x.view(batch, seq, heads, head_dim).transpose(1, 2)
+    assert result.shape == (batch, heads, seq, head_dim)
+    return result
+
+def merge_heads(x):
+    batch, heads, seq, head_dim = x.shape
+    result = x.transpose(1, 2).contiguous().view(
+        batch, seq, heads * head_dim
+    )
+    assert result.shape == (batch, seq, heads * head_dim)
+    return result
+
+x = torch.randn(2, 5, 12)
+assert torch.equal(merge_heads(split_heads(x, 3)), x)
+```
+
+完整 forward 可记录：
+
+```text
+input Q/K/V
+projected Q/K/V
+split Q/K/V
+scores
+weights
+context per head
+merged context
+output
+```
+
+只打印最终 output shape 无法定位中间轴交换错误。
+
+## Head 冗余与诊断
+
+多头提供表达机会，不保证每个 head 都有效。实际模型可能出现：
+
+- 多个 head 学到高度相似的 attention pattern。
+- 某些 head 权重近似均匀。
+- 某些 head 长期只关注固定位置或特殊 token。
+- 剪除少量 head 后质量变化很小。
+
+仅凭 attention heatmap 不能判断 head 是否重要。更可靠的诊断需要结合 ablation、输出变化、
+梯度或任务指标。标准 MHA 也没有正交约束，因此不要把 `H` 直接解释成 `H` 种独立知识。
+
+## 本章调试不变量
+
+1. `D == H * Dh`，所有 Q/K/V 投影输出最后一维都为 `D`。
+2. Split 后轴顺序严格为 `[B,H,T,Dh]`。
+3. K/V 的 sequence length 相同，输出 length 跟随 Q。
+4. Score 最后两维为 `[Tq,Tk]`，Mask key 轴等于 `Tk`。
+5. Merge 前先恢复 `[B,T,H,Dh]` 的逻辑顺序。
+6. Output projection 后 shape 回到 `[B,Tq,D]`，可与 residual 相加。
+7. 参数量统计使用 Parameter 实际 shape，不把 head 数重复乘入。
 
 ## 常见错误
 

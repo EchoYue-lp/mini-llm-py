@@ -140,6 +140,9 @@ python -m labs.lab11_moe_variants
 
 `lab11` 在相同输入上比较 Dense MoE、Sparse MoE 与 Shared-Expert Sparse MoE。
 
+`lab08` 还会输出 router entropy、Top-1 count、balance-loss 基线和 router gradient norm；
+`lab11` 会验证只有实际收到 token 的 expert 才产生 expert 参数梯度。
+
 ## 原始资料
 
 - [DeepSeek-V2 Technical Report](https://arxiv.org/abs/2405.04434)
@@ -295,6 +298,198 @@ FLOPs，还取决于 all-to-all 通信、设备拓扑和负载均衡。
 
 Batch 中 token 路由到不同 experts，会产生不规则计算。小 batch 下每个 expert 收到的
 token 太少，矩阵乘法效率可能很低。因此 MoE 参数量很大不代表单请求延迟一定理想。
+
+## Top-K 选择的梯度路径
+
+`topk` 返回离散 expert index。Index 在局部范围内是分段常量，不能像普通连续函数一样对
+“选择了哪个 expert”求导。训练信号主要通过：
+
+- 已选 expert 的 combine weight。
+- Router Softmax probability。
+- Load-balance、z-loss 等辅助目标。
+- 被选 expert 的输出对主任务 loss 的贡献。
+
+未选 expert 不执行该 token，也不会从该 token 获得 expert 参数梯度。Router logit 只有在
+选择边界变化或连续权重/辅助损失路径中才改变路由行为。
+
+这解释了 router collapse 为什么可能自我强化：热门 expert 获得更多 token 和训练信号，
+冷门 expert 更难变好。辅助损失、router noise 或初始化用于打破这一反馈。
+
+## Top-K 重新归一化的语义
+
+原 router probability 对全部 `E` 个 expert 求和为 1。只保留集合 `S` 后：
+
+$$
+\hat p_e=\frac{p_e}{\sum_{j\in S}p_j},\quad e\in S
+$$
+
+重新归一化使 routed mixture 权重和为 1。若不归一化，输出幅值还会乘以“Top-K 原始概率
+质量”，相当于引入额外 gate 强度。
+
+本项目：
+
+- `TopKMoE` 和普通 `SparseMoE` 默认重新归一化。
+- `SharedExpertSparseMoE` 内部 routed 分支设置 `renormalize_topk=False`，再与 always-on
+  shared output 相加。
+
+两种都是可能设计，但不能只凭 `top_k=2` 假设 combine 权重和一定为 1。
+
+## Dispatch/Combine 的索引不变量
+
+展平 token 后：
+
+```text
+tokens:      [N,D]
+top_indices: [N,K]
+top_weights: [N,K]
+```
+
+对 expert `e`：
+
+```python
+token_indices, choice_indices = torch.where(top_indices == e)
+selected_inputs = tokens[token_indices]
+selected_outputs = expert(selected_inputs)
+weighted = selected_outputs * top_weights[
+    token_indices, choice_indices
+].unsqueeze(-1)
+output.index_add_(0, token_indices, weighted)
+```
+
+同一个 token 会在 Top-K 中出现 K 次，`index_add_` 把多个 expert 贡献加回同一原始位置。
+必须同时保留 token index 和该 expert 在 Top-K 中的 choice index，否则会取错权重。
+
+## Capacity 的整数定义
+
+总 assignment 数是 `N*K`。理想均匀负载为：
+
+$$
+\frac{NK}{E}
+$$
+
+常见容量：
+
+$$
+C=\left\lceil capacity\_factor\frac{NK}{E}\right\rceil
+$$
+
+还需要明确 capacity 是每个 expert、每个设备、每个 microbatch 还是整个 global batch 计算。
+梯度累积不会自动把多个 microbatch 的 dispatch 合并；每次 forward 的容量利用率可能不同。
+
+Top-2 的 second-choice assignment 也占容量。只按 token 数 `N` 而忘记乘 `K`，会把容量估小。
+
+## Balance Loss 的基线
+
+本项目简化形式：
+
+$$
+L_{balance}=E\sum_e importance_e\,load_e
+$$
+
+若 probability 和 Top-1 load 都完全均匀：
+
+```text
+importance_e = 1/E
+load_e = 1/E
+L_balance = 1
+```
+
+若所有 token 都路由到一个 expert，且 probability 也高度集中，loss 可接近 `E`。因此该辅助
+loss 的绝对值不是“越接近 0 越好”；应知道公式基线并乘上配置中的辅助系数后再解释。
+
+不同论文的 balance loss 定义、Top-1/Top-K load、是否跨设备聚合可能不同，不能只比较同名
+指标。
+
+## Router Z-Loss 的公式
+
+一种常见形式：
+
+$$
+L_z=\frac{1}{N}\sum_n\left(\log\sum_e e^{z_{n,e}}\right)^2
+$$
+
+它惩罚 router `logsumexp` 过大，限制 logit 整体尺度。Softmax 对共同平移不敏感，但浮点
+计算和优化器会受大 logits 影响，所以 z-loss 能改善数值行为。
+
+Z-loss 不直接保证负载均匀；balance loss 也不直接限制 logits 绝对尺度，两者职责不同。
+
+## Router 精度、噪声与抖动
+
+Top-K 对接近的 logits 很敏感。低精度舍入可能改变 expert 排名，导致路由离散跳变。实践中
+常让 router logits/Softmax 使用 FP32，即使 expert FFN 使用 BF16/FP16。
+
+训练期还可能加入：
+
+- Input jitter。
+- Router logit noise。
+- 随机 second-expert 策略。
+
+这些机制用于探索和负载均衡，评估/推理通常关闭。忘记区分 train/eval 会让路由不可复现。
+
+## 参数量与激活计算公式
+
+若单个 expert FFN 参数为 `Pexpert`：
+
+```text
+总 expert 参数 = E * Pexpert
+每 token routed expert 计算约 = K * expert_compute
+```
+
+Shared expert 另加固定项：
+
+```text
+active experts/token = num_shared + K
+```
+
+Router 参数约 `D*E`，通常小于 expert 总参数，但 router Softmax、Top-K、dispatch、padding 到
+capacity 和通信都增加额外时间。稀疏激活降低的是 expert FFN 计算，不会降低 Attention、
+embedding 或 KV Cache。
+
+## Expert Parallel 的通信量直觉
+
+若 token 路由到远端设备，dispatch 至少发送 hidden state `[D]`，combine 再返回 expert 输出
+`[D]`。粗略每 assignment 通信量与：
+
+```text
+2 * D * bytes_per_element
+```
+
+成正比，还不含元数据、padding、网络协议和同步。Top-K 增大既增加 expert 计算，也增加潜在
+通信。负载不均会产生 straggler：所有设备等待最忙 expert 完成。
+
+## 可运行的路由健康检查
+
+```python
+def route_metrics(probabilities, top_indices, num_experts):
+    top1 = top_indices[:, 0]
+    counts = torch.bincount(top1, minlength=num_experts)
+    fractions = counts.float() / top1.numel()
+    entropy = -(probabilities * probabilities.clamp_min(1e-9).log()).sum(-1)
+    return {
+        "counts": counts,
+        "fractions": fractions,
+        "mean_entropy": entropy.mean(),
+        "unused_experts": (counts == 0).sum(),
+    }
+
+tokens = x.reshape(-1, x.size(-1))
+probabilities = torch.softmax(moe.router(tokens).float(), dim=-1)
+top_indices = probabilities.topk(moe.top_k, dim=-1).indices
+metrics = route_metrics(probabilities, top_indices, moe.num_experts)
+print(metrics)
+```
+
+应按层记录这些指标。全模型合并统计可能掩盖某一层已经 collapse。
+
+## 本章调试不变量
+
+1. `top_indices/top_weights` shape 为 `[N,K]`，每个 token 恰有 K 个 assignment。
+2. Combine 使用正确 token index 与 choice index，输出恢复原 `[B,T,D]`。
+3. 明确 Top-K 是否重新归一化，shared expert 是否另行相加。
+4. Capacity 按 `N*K/E` 计算并记录 overflow/dropped 数。
+5. Balance loss 解释基于其理论基线，不假设最优值为 0。
+6. Router logits 精度、噪声和 train/eval 行为明确。
+7. 每层分别监控 count、entropy、overflow、grad norm 和通信时间。
 
 ## 动手练习
 

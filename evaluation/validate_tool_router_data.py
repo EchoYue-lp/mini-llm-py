@@ -49,9 +49,14 @@ def validate_answer(answer: dict[str, Any], location: str) -> None:
     if action == "call_tool":
         if tool not in TOOL_ARGUMENTS:
             fail(location, f"unknown tool {tool!r}")
-        unknown_arguments = set(answer["arguments"]) - TOOL_ARGUMENTS[tool]
+        required_arguments = TOOL_ARGUMENTS[tool]
+        actual_arguments = set(answer["arguments"])
+        unknown_arguments = actual_arguments - required_arguments
         if unknown_arguments:
             fail(location, f"unknown tool arguments: {sorted(unknown_arguments)}")
+        missing_arguments = required_arguments - actual_arguments
+        if missing_arguments:
+            fail(location, f"missing tool arguments: {sorted(missing_arguments)}")
         if answer["missing_arguments"]:
             fail(location, "call_tool cannot contain missing arguments")
     else:
@@ -59,6 +64,8 @@ def validate_answer(answer: dict[str, Any], location: str) -> None:
             fail(location, f"{action} requires tool=null")
         if answer["arguments"]:
             fail(location, f"{action} requires empty arguments")
+    if action == "ask_clarification" and not answer["missing_arguments"]:
+        fail(location, "ask_clarification requires missing arguments")
     if action == "no_tool" and answer["missing_arguments"]:
         fail(location, "no_tool cannot contain missing arguments")
 
