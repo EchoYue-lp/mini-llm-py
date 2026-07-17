@@ -42,7 +42,7 @@ def prepare_dataset(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def summarize_splits(frame: pd.DataFrame) -> pd.DataFrame:
-    """Return sample count and average token count for each dataset split."""
+    """Return sample count and average whitespace-word count by split."""
     return (
         frame.groupby("split", as_index=False)
         .agg(

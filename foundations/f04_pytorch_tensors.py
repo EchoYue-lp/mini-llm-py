@@ -3,7 +3,8 @@
 Exercises after running this module:
 1. Move the demo tensors to CUDA or MPS when available.
 2. Create a fully masked row and inspect the output of ``masked_softmax``.
-3. Deliberately omit ``contiguous`` before ``view`` and inspect the error.
+3. Compare strides before transpose, after transpose, and after contiguous.
+4. Deliberately omit ``contiguous`` before ``view`` and inspect the error.
 """
 
 from __future__ import annotations
@@ -98,12 +99,26 @@ def run_demo() -> None:
     copied_tensor[1] = -1
     assert array[1] != -1
 
+    matrix = torch.arange(12).view(3, 4)
+    transposed = matrix.transpose(0, 1)
+    sliced = matrix[:, ::2]
+    expanded = feature_scale.view(1, 4).expand(3, 4)
+    contiguous_transposed = transposed.contiguous()
+    assert matrix.stride() == (4, 1)
+    assert transposed.shape == (4, 3) and transposed.stride() == (1, 4)
+    assert sliced.shape == (3, 2) and sliced.stride() == (4, 2)
+    assert expanded.stride() == (0, 1)
+    assert contiguous_transposed.stride() == (3, 1)
+
     print("hidden:", hidden.shape, hidden.dtype, hidden.device)
     print("preferred device:", preferred_device())
     print("broadcast output:", broadcast_output.shape)
     print("linear projection:", projected.shape)
     print("split heads:", heads.shape, "merge heads:", restored.shape)
     print("causal attention row sums:\n", probabilities.sum(-1))
+    print("matrix/transpose strides:", matrix.stride(), transposed.stride())
+    print("slice/expand strides:", sliced.stride(), expanded.stride())
+    print("contiguous transpose stride:", contiguous_transposed.stride())
     print("torch.from_numpy shares memory; torch.tensor copies data")
 
 

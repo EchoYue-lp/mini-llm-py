@@ -8,6 +8,8 @@ import torch.nn.functional as F
 class RMSNorm(nn.Module):
     def __init__(self, d_model, eps=1e-6):
         super().__init__()
+        if d_model <= 0 or eps <= 0:
+            raise ValueError("d_model and eps must be positive")
         self.weight = nn.Parameter(torch.ones(d_model))
         self.eps = eps
 
@@ -22,7 +24,12 @@ class RMSNorm(nn.Module):
 
 def apply_rope(x, base=10000.0, position_offset=0):
     """Apply rotary position embeddings to [batch, heads, seq, head_dim]."""
-
+    if x.ndim != 4:
+        raise ValueError("RoPE input must have shape [B,H,T,Dh]")
+    if base <= 0:
+        raise ValueError("RoPE base must be positive")
+    if not isinstance(position_offset, int) or position_offset < 0:
+        raise ValueError("position_offset must be a non-negative integer")
     head_dim = x.size(-1)
     if head_dim % 2:
         raise ValueError("RoPE requires an even head dimension")
@@ -54,6 +61,8 @@ def apply_rope(x, base=10000.0, position_offset=0):
 class SwiGLU(nn.Module):
     def __init__(self, d_model, hidden_dim):
         super().__init__()
+        if d_model <= 0 or hidden_dim <= 0:
+            raise ValueError("d_model and hidden_dim must be positive")
         self.gate = nn.Linear(d_model, hidden_dim, bias=False)
         self.up = nn.Linear(d_model, hidden_dim, bias=False)
         self.down = nn.Linear(hidden_dim, d_model, bias=False)
@@ -68,6 +77,8 @@ def parameter_count(module):
 
 def equal_budget_swiglu_hidden(d_model, classic_hidden):
     """Match 3*D*F SwiGLU weights to 2*D*Dff classic FFN weights."""
+    if d_model <= 0 or classic_hidden <= 0:
+        raise ValueError("d_model and classic_hidden must be positive")
     return round(2 * classic_hidden / 3)
 
 

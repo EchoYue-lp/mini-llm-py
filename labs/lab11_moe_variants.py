@@ -8,6 +8,8 @@ import torch.nn.functional as F
 class Expert(nn.Module):
     def __init__(self, d_model=16, hidden_dim=32):
         super().__init__()
+        if d_model <= 0 or hidden_dim <= 0:
+            raise ValueError("d_model and hidden_dim must be positive")
         self.up = nn.Linear(d_model, hidden_dim)
         self.down = nn.Linear(hidden_dim, d_model)
 
@@ -20,12 +22,16 @@ class DenseMoE(nn.Module):
 
     def __init__(self, d_model=16, hidden_dim=32, num_experts=4):
         super().__init__()
+        if num_experts <= 0:
+            raise ValueError("num_experts must be positive")
         self.router = nn.Linear(d_model, num_experts, bias=False)
         self.experts = nn.ModuleList(
             [Expert(d_model, hidden_dim) for _ in range(num_experts)]
         )
 
     def forward(self, x):
+        if x.ndim < 2 or x.size(-1) != self.router.in_features:
+            raise ValueError("Dense MoE input must have shape [...,d_model]")
         weights = torch.softmax(self.router(x), dim=-1)
         expert_outputs = torch.stack([expert(x) for expert in self.experts], dim=-2)
         return (expert_outputs * weights.unsqueeze(-1)).sum(dim=-2), weights
@@ -43,6 +49,8 @@ class SparseMoE(nn.Module):
         renormalize_topk=True,
     ):
         super().__init__()
+        if d_model <= 0 or hidden_dim <= 0 or num_experts <= 0:
+            raise ValueError("model dimensions and num_experts must be positive")
         if not 1 <= top_k <= num_experts:
             raise ValueError("top_k must be between 1 and num_experts")
         self.num_experts = num_experts
@@ -54,6 +62,8 @@ class SparseMoE(nn.Module):
         )
 
     def route(self, tokens):
+        if tokens.ndim != 2 or tokens.size(-1) != self.router.in_features:
+            raise ValueError("routed tokens must have shape [N,d_model]")
         probabilities = torch.softmax(self.router(tokens), dim=-1)
         top_weights, top_indices = probabilities.topk(self.top_k, dim=-1)
         if self.renormalize_topk:
@@ -61,6 +71,8 @@ class SparseMoE(nn.Module):
         return probabilities, top_weights, top_indices
 
     def forward(self, x):
+        if x.ndim < 2 or x.size(-1) != self.router.in_features:
+            raise ValueError("Sparse MoE input must have shape [...,d_model]")
         shape = x.shape
         tokens = x.reshape(-1, x.size(-1))
         probabilities, top_weights, top_indices = self.route(tokens)
@@ -102,6 +114,8 @@ class SharedExpertSparseMoE(nn.Module):
         top_k=2,
     ):
         super().__init__()
+        if num_shared_experts <= 0 or num_routed_experts <= 0:
+            raise ValueError("shared and routed expert counts must be positive")
         self.shared_experts = nn.ModuleList(
             [Expert(d_model, hidden_dim) for _ in range(num_shared_experts)]
         )

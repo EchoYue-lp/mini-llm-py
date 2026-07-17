@@ -9,6 +9,8 @@ import torch.nn as nn
 class CachedSelfAttention(nn.Module):
     def __init__(self, d_model=16):
         super().__init__()
+        if d_model <= 0:
+            raise ValueError("d_model must be positive")
         self.d_model = d_model
         self.q_proj = nn.Linear(d_model, d_model, bias=False)
         self.k_proj = nn.Linear(d_model, d_model, bias=False)
@@ -16,6 +18,8 @@ class CachedSelfAttention(nn.Module):
         self.out_proj = nn.Linear(d_model, d_model, bias=False)
 
     def full(self, x):
+        if x.ndim != 3 or x.size(-1) != self.d_model:
+            raise ValueError("x must have shape [B,T,d_model]")
         query = self.q_proj(x)
         key = self.k_proj(x)
         value = self.v_proj(x)
@@ -27,12 +31,20 @@ class CachedSelfAttention(nn.Module):
         return self.out_proj(weights @ value)
 
     def step(self, x, cache=None):
+        if x.ndim != 3 or x.shape[1:] != (1, self.d_model):
+            raise ValueError("step expects exactly one new token with shape [B,1,D]")
         query = self.q_proj(x)
         new_key = self.k_proj(x)
         new_value = self.v_proj(x)
         if cache is None:
             key, value = new_key, new_value
         else:
+            if len(cache) != 2 or cache[0].shape != cache[1].shape:
+                raise ValueError("cache must be a (key, value) pair with equal shapes")
+            if cache[0].ndim != 3 or cache[0].size(0) != x.size(0):
+                raise ValueError("cache batch shape must match the new token")
+            if cache[0].size(-1) != self.d_model:
+                raise ValueError("cache feature width must match d_model")
             key = torch.cat([cache[0], new_key], dim=1)
             value = torch.cat([cache[1], new_value], dim=1)
         scores = query @ key.transpose(-2, -1) / math.sqrt(self.d_model)
@@ -42,6 +54,8 @@ class CachedSelfAttention(nn.Module):
 
 def projection_token_work(sequence_length):
     """Compare token projections with full-prefix recompute and KV caching."""
+    if sequence_length <= 0:
+        raise ValueError("sequence_length must be positive")
     without_cache = sequence_length * (sequence_length + 1) // 2
     with_cache = sequence_length
     return without_cache, with_cache

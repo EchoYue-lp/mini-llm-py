@@ -9,6 +9,26 @@
 3. 解释 MHA、MQA、GQA 的 head 共享关系。
 4. 区分 KV Cache、GQA 和 FlashAttention 解决的问题。
 
+## 本章符号与 Shape
+
+| 符号 | 含义 |
+| --- | --- |
+| `L` | Transformer 层数 |
+| `B` | 活跃序列或 beam 数 |
+| `T` | 已缓存的上下文长度 |
+| `Hq` | query head 数 |
+| `Hkv` | key/value head 数 |
+| `Dh` | 单个 head 的特征宽度 |
+| `s` | 每个 cache 元素的字节数 |
+
+单层 K/V cache 元素数是 `2*B*Hkv*T*Dh`，全模型近似字节数是：
+
+```text
+2 * L * B * Hkv * T * Dh * s
+```
+
+这里的 `2` 分别代表 K 和 V，不是 FP16 的字节数；dtype 字节数由最后的 `s` 单独计算。
+
 ## KV Cache 解决什么问题
 
 生成第 `t` 个 token 时，历史 token 的 K/V 与前一步相同。若每一步都重新投影完整

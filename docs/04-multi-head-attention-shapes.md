@@ -11,6 +11,19 @@ Multi-Head Attention 将隐藏维拆到多个子空间中并行计算。
 3. 估算 Multi-Head Attention 参数量。
 4. 区分 self-attention 与 cross-attention 的长度维度。
 
+## 本章符号与 Shape
+
+| 符号 | 含义 | 约束 |
+| --- | --- | --- |
+| `B` | batch size | 正整数 |
+| `T/Tq/Tk` | self/query/key 序列长度 | cross-attention 中 `Tq` 可不等于 `Tk` |
+| `D` | 模型隐藏维度 | residual 前后必须保持 |
+| `H` | query head 数 | `D % H == 0` |
+| `Dh` | 单个 head 宽度 | `Dh = D / H` |
+| `M` | 某个投影输出宽度 | 普通 MHA 的 Q/K/V 常取 `M=D` |
+
+方括号中的字母都是轴的语义，不是具体数值。把 `D=12,H=3` 代入后才得到 `Dh=4`。
+
 ## 拆分
 
 ```text

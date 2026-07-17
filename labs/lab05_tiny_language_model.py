@@ -11,6 +11,9 @@ from utils.mask_utils import create_causal_mask
 
 
 def make_pattern_batch(batch_size, seq_len, vocab_size, device="cpu"):
+    """Create inputs and labels where every label is the next modular token."""
+    if batch_size <= 0 or seq_len <= 0 or vocab_size <= 1:
+        raise ValueError("batch_size/seq_len must be positive and vocab_size > 1")
     starts = torch.randint(0, vocab_size, (batch_size, 1), device=device)
     offsets = torch.arange(seq_len + 1, device=device).unsqueeze(0)
     sequence = (starts + offsets) % vocab_size
@@ -18,17 +21,35 @@ def make_pattern_batch(batch_size, seq_len, vocab_size, device="cpu"):
 
 
 def generate(model, prompt, new_tokens):
+    """Greedily append ``new_tokens`` while preserving the model's prior mode."""
+    if prompt.ndim != 2 or prompt.size(1) == 0:
+        raise ValueError("prompt must have shape [B,T] with T > 0")
+    if prompt.dtype != torch.long:
+        raise TypeError("prompt token ids must use torch.long")
+    if new_tokens < 0:
+        raise ValueError("new_tokens must be non-negative")
+    max_len = model.pos_enc.pe.size(1)
+    if prompt.size(1) + new_tokens > max_len:
+        raise ValueError("prompt plus generated tokens exceeds position table")
+
     tokens = prompt.clone()
-    with torch.no_grad():
-        for _ in range(new_tokens):
-            mask = create_causal_mask(tokens.size(1), device=tokens.device)
-            logits, _ = model(tokens, mask)
-            next_token = logits[:, -1].argmax(dim=-1, keepdim=True)
-            tokens = torch.cat([tokens, next_token], dim=1)
+    was_training = model.training
+    model.eval()
+    try:
+        with torch.no_grad():
+            for _ in range(new_tokens):
+                mask = create_causal_mask(tokens.size(1), device=tokens.device)
+                logits, _ = model(tokens, mask)
+                next_token = logits[:, -1].argmax(dim=-1, keepdim=True)
+                tokens = torch.cat([tokens, next_token], dim=1)
+    finally:
+        model.train(was_training)
     return tokens
 
 
 def train_language_model(steps=100, device="cpu"):
+    if steps <= 0:
+        raise ValueError("steps must be positive")
     torch.manual_seed(11)
     vocab_size = 12
     model = DecoderOnlyModel(

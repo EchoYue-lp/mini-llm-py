@@ -11,6 +11,19 @@
 3. 比较 Pre-LN 与 Post-LN 的数据和梯度路径。
 4. 说明 residual、dropout 和 final norm 的作用。
 
+## 本章符号与 Shape
+
+| 符号 | 含义 | 常见关系 |
+| --- | --- | --- |
+| `B` | batch size | 不被 block 改变 |
+| `T` | sequence length | FFN 不混合该轴 |
+| `D` | residual stream 宽度 | block 输入输出均为 `[B,T,D]` |
+| `Dff` | FFN 中间宽度 | 经典实现常大于 `D` |
+| `L` | Transformer block 层数 | final norm 位于 L 层之后 |
+
+Residual add 的两侧必须完全同 shape。`Dff` 只存在于 FFN 内部，不能直接与 residual stream
+相加；必须先通过第二个 Linear 投影回 `D`。
+
 ## Position-wise FFN
 
 经典 FFN：

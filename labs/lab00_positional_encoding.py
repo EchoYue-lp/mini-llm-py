@@ -9,6 +9,11 @@ from labs.lab07_modern_blocks import apply_rope
 
 
 def sinusoidal_position_encoding(seq_len, d_model, device="cpu"):
+    """Return a fixed position table with shape ``[seq_len, d_model]``."""
+    if seq_len <= 0:
+        raise ValueError("seq_len must be positive")
+    if d_model <= 0:
+        raise ValueError("d_model must be positive")
     positions = torch.arange(seq_len, device=device).float().unsqueeze(1)
     frequencies = torch.exp(
         torch.arange(0, d_model, 2, device=device).float()
@@ -38,9 +43,17 @@ def shift_sinusoidal_pair(pair, delta_angle):
 class LearnedPositionEmbedding(nn.Module):
     def __init__(self, max_len, d_model):
         super().__init__()
+        if max_len <= 0 or d_model <= 0:
+            raise ValueError("max_len and d_model must be positive")
         self.embedding = nn.Embedding(max_len, d_model)
 
     def forward(self, token_embeddings):
+        if token_embeddings.ndim != 3:
+            raise ValueError("token_embeddings must have shape [B,T,D]")
+        if token_embeddings.size(-1) != self.embedding.embedding_dim:
+            raise ValueError("input feature width must match d_model")
+        if token_embeddings.size(1) > self.embedding.num_embeddings:
+            raise ValueError("sequence length exceeds learned position table")
         positions = torch.arange(
             token_embeddings.size(1), device=token_embeddings.device
         )
@@ -68,6 +81,8 @@ def run_demo():
     shifted_pair = shift_sinusoidal_pair(sinusoidal[1, :2], delta_angle=2.0)
     assert torch.allclose(shifted_pair, sinusoidal[3, :2], atol=1e-6)
     assert sum(parameter.numel() for parameter in learned.parameters()) == 16 * 8
+    odd_encoding = sinusoidal_position_encoding(4, 7)
+    assert odd_encoding.shape == (4, 7)
 
     print("sinusoidal PE:", sinusoidal.shape, "fixed, added to token embeddings")
     print(
@@ -78,6 +93,7 @@ def run_demo():
     )
     print("RoPE output:", with_rope.shape, "rotates Q/K instead of adding to x")
     print("sin/cos pair shift check: position 1 + delta 2 == position 3")
+    print("odd d_model position table:", odd_encoding.shape)
 
 
 if __name__ == "__main__":

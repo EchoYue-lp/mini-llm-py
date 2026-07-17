@@ -8,6 +8,8 @@ import torch.nn.functional as F
 class Expert(nn.Module):
     def __init__(self, d_model, hidden_dim):
         super().__init__()
+        if d_model <= 0 or hidden_dim <= 0:
+            raise ValueError("d_model and hidden_dim must be positive")
         self.up = nn.Linear(d_model, hidden_dim)
         self.down = nn.Linear(hidden_dim, d_model)
 
@@ -18,6 +20,8 @@ class Expert(nn.Module):
 class TopKMoE(nn.Module):
     def __init__(self, d_model=16, hidden_dim=32, num_experts=4, top_k=2):
         super().__init__()
+        if d_model <= 0 or hidden_dim <= 0 or num_experts <= 0:
+            raise ValueError("model dimensions and num_experts must be positive")
         if not 1 <= top_k <= num_experts:
             raise ValueError("top_k must be between 1 and num_experts")
         self.num_experts = num_experts
@@ -28,6 +32,8 @@ class TopKMoE(nn.Module):
         )
 
     def forward(self, x):
+        if x.ndim < 2 or x.size(-1) != self.router.in_features:
+            raise ValueError("MoE input must have shape [...,d_model]")
         original_shape = x.shape
         tokens = x.reshape(-1, x.size(-1))
         router_probs = torch.softmax(self.router(tokens), dim=-1)
@@ -61,6 +67,8 @@ class TopKMoE(nn.Module):
 
 
 def router_diagnostics(moe, x):
+    if x.ndim < 2 or x.size(-1) != moe.router.in_features:
+        raise ValueError("MoE input must have shape [...,d_model]")
     tokens = x.reshape(-1, x.size(-1))
     probabilities = torch.softmax(moe.router(tokens).float(), dim=-1)
     top_weights, top_indices = probabilities.topk(moe.top_k, dim=-1)

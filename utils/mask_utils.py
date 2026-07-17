@@ -8,6 +8,8 @@ def create_causal_mask(seq_len, device=None):
         mask: (1, 1, seq_len, seq_len)，下三角为1，上三角为0
               会在 MultiHeadAttention 中广播到 (batch, num_heads, seq_len, seq_len)
     """
+    if seq_len <= 0:
+        raise ValueError("seq_len must be positive")
     # 下三角为1，上三角为0
     mask = torch.tril(torch.ones((seq_len, seq_len), dtype=torch.bool, device=device))
     # 添加 batch 和 head 维度: (1, 1, seq_len, seq_len)
@@ -25,6 +27,8 @@ def create_padding_mask(seq, pad_token_id=0):
         mask: (batch, 1, 1, seq_len)，非 padding 位置为 True，padding 位置为 False
               会在 attention 中广播到 (batch, num_heads, seq_len, seq_len)
     """
+    if seq.ndim != 2:
+        raise ValueError("seq must have shape [B,T]")
     # (batch, seq_len) -> (batch, 1, 1, seq_len)
     return (seq != pad_token_id).unsqueeze(1).unsqueeze(2)
 
@@ -46,18 +50,19 @@ def combine_masks(causal_mask, padding_mask):
         >>> padding = create_padding_mask(seq)  # (1, 1, 1, 4)
         >>> mask = combine_masks(causal, padding)  # (1, 1, 4, 4)
     """
-    # padding_mask: (batch, 1, 1, seq_len) -> (batch, 1, seq_len, seq_len)
-    # 需要在 key 维度上扩展，表示每个 query 位置对所有 key 位置的 padding 状态
-    batch_size = padding_mask.size(0)
-    seq_len = padding_mask.size(-1)
-
-    # 扩展 padding_mask 到 (batch, 1, seq_len, seq_len)
-    # 每一行都是相同的 padding mask，表示哪些 key 位置是有效的
-    padding_mask_expanded = padding_mask.expand(batch_size, 1, seq_len, seq_len)
-
-    # causal_mask: (1, 1, seq_len, seq_len) 会自动广播到 (batch, 1, seq_len, seq_len)
-    # 逐元素与操作：只有同时满足因果关系和非 padding 才为 True
-    return causal_mask & padding_mask_expanded
+    if causal_mask.dtype != torch.bool or padding_mask.dtype != torch.bool:
+        raise TypeError("causal and padding masks must be boolean")
+    if causal_mask.device != padding_mask.device:
+        raise ValueError("causal and padding masks must be on the same device")
+    if causal_mask.ndim != 4 or padding_mask.ndim != 4:
+        raise ValueError("masks must have four dimensions")
+    if causal_mask.size(-1) != padding_mask.size(-1):
+        raise ValueError("causal and padding masks must use the same key length")
+    try:
+        torch.broadcast_shapes(causal_mask.shape, padding_mask.shape)
+    except RuntimeError as error:
+        raise ValueError("causal and padding masks are not broadcastable") from error
+    return causal_mask & padding_mask
 
 def collate_fn_lm(batch, pad_token_id=0):
     """
@@ -76,6 +81,10 @@ def collate_fn_lm(batch, pad_token_id=0):
         - 使用时应配合 CrossEntropyLoss(ignore_index=pad_token_id)
         - 训练时应使用 combine_masks(causal_mask, padding_mask)
     """
+    if not batch:
+        raise ValueError("batch must contain at least one sequence")
+    if any(len(sequence) < 2 for sequence in batch):
+        raise ValueError("every LM sequence needs at least two tokens")
     # batch: List[List[int]]
     max_len = max(len(x) for x in batch)
     batch_tensor = torch.full((len(batch), max_len), pad_token_id, dtype=torch.long)
@@ -102,6 +111,12 @@ def collate_fn_mt(src_batch, tgt_batch, pad_token_id=0):
         - 使用时应配合 CrossEntropyLoss(ignore_index=pad_token_id)
         - 训练时需要创建对应的 padding mask
     """
+    if not src_batch or not tgt_batch:
+        raise ValueError("source and target batches must be non-empty")
+    if len(src_batch) != len(tgt_batch):
+        raise ValueError("source and target batch sizes must match")
+    if any(not sequence for sequence in (*src_batch, *tgt_batch)):
+        raise ValueError("source and target sequences must be non-empty")
     # src_batch, tgt_batch: List[List[int]]
     src_max = max(len(x) for x in src_batch)
     tgt_max = max(len(x) for x in tgt_batch)

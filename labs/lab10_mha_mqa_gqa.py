@@ -1,9 +1,9 @@
 """Lab 10: one implementation spanning MHA, MQA, and GQA."""
 
-import math
-
 import torch
 import torch.nn as nn
+
+from labs.lab01_attention_basics import scaled_dot_product_attention
 
 
 class GroupedQuerySelfAttention(nn.Module):
@@ -16,6 +16,8 @@ class GroupedQuerySelfAttention(nn.Module):
 
     def __init__(self, d_model=32, num_query_heads=8, num_kv_heads=2):
         super().__init__()
+        if d_model <= 0 or num_query_heads <= 0 or num_kv_heads <= 0:
+            raise ValueError("d_model and head counts must be positive")
         if d_model % num_query_heads != 0:
             raise ValueError("d_model must be divisible by num_query_heads")
         if num_query_heads % num_kv_heads != 0:
@@ -33,7 +35,7 @@ class GroupedQuerySelfAttention(nn.Module):
     def _split(self, x, num_heads):
         batch_size, seq_len, _ = x.shape
         return (
-            x.view(batch_size, seq_len, num_heads, self.head_dim)
+            x.reshape(batch_size, seq_len, num_heads, self.head_dim)
             .transpose(1, 2)
         )
 
@@ -42,20 +44,20 @@ class GroupedQuerySelfAttention(nn.Module):
         return x.repeat_interleave(repeats, dim=1)
 
     def forward(self, x, mask=None):
+        if x.ndim != 3 or x.size(-1) != self.d_model:
+            raise ValueError("attention input must have shape [B,T,d_model]")
         query = self._split(self.q_proj(x), self.num_query_heads)
         key_compact = self._split(self.k_proj(x), self.num_kv_heads)
         value_compact = self._split(self.v_proj(x), self.num_kv_heads)
         key = self._expand_kv(key_compact)
         value = self._expand_kv(value_compact)
 
-        scores = query @ key.transpose(-2, -1) / math.sqrt(self.head_dim)
         if mask is None:
             seq_len = x.size(1)
             mask = torch.tril(
                 torch.ones(seq_len, seq_len, dtype=torch.bool, device=x.device)
             ).view(1, 1, seq_len, seq_len)
-        weights = torch.softmax(scores.masked_fill(~mask, float("-inf")), dim=-1)
-        attended = weights @ value
+        attended, weights = scaled_dot_product_attention(query, key, value, mask)
         merged = attended.transpose(1, 2).contiguous().view(
             x.size(0), x.size(1), self.d_model
         )

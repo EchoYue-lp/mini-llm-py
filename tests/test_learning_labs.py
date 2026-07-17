@@ -1,6 +1,8 @@
+import pytest
 import torch
 
 from labs.lab00_positional_encoding import (
+    LearnedPositionEmbedding,
     shift_sinusoidal_pair,
     sinusoidal_position_encoding,
 )
@@ -17,7 +19,11 @@ from labs.lab02_multi_head_attention import (
 from labs.lab03_pre_ln_block import identity_path_gradient
 from labs.lab04_tiny_copy_task import make_copy_batch
 from labs.lab05_tiny_language_model import make_pattern_batch
-from labs.lab06_kv_cache import compare_full_and_cached, projection_token_work
+from labs.lab06_kv_cache import (
+    CachedSelfAttention,
+    compare_full_and_cached,
+    projection_token_work,
+)
 from labs.lab07_modern_blocks import (
     RMSNorm,
     SwiGLU,
@@ -43,6 +49,17 @@ def test_attention_mask_and_probability_rows():
     assert torch.allclose(weights.sum(-1), torch.ones(1, 4))
     assert torch.count_nonzero(weights[0].triu(1)) == 0
 
+    _, fully_masked = scaled_dot_product_attention(
+        query,
+        query,
+        query,
+        torch.zeros(4, 4, dtype=torch.bool),
+    )
+    assert torch.count_nonzero(fully_masked) == 0
+
+    with pytest.raises(TypeError, match="boolean dtype"):
+        scaled_dot_product_attention(query, query, query, torch.ones(4, 4))
+
 
 def test_sinusoidal_position_zero_has_expected_pattern():
     encoding = sinusoidal_position_encoding(6, 8)
@@ -54,6 +71,9 @@ def test_sinusoidal_position_zero_has_expected_pattern():
         encoding[3, :2],
         atol=1e-6,
     )
+    assert sinusoidal_position_encoding(4, 7).shape == (4, 7)
+    with pytest.raises(ValueError, match="exceeds learned position table"):
+        LearnedPositionEmbedding(max_len=3, d_model=8)(torch.randn(1, 4, 8))
 
 
 def test_attention_scaling_restores_unit_score_scale():
@@ -66,6 +86,12 @@ def test_attention_scaling_restores_unit_score_scale():
 def test_split_and_merge_heads_are_inverse():
     x = torch.randn(2, 5, 16)
     assert torch.allclose(merge_heads(split_heads(x, 4)), x)
+    non_contiguous = torch.randn(2, 16, 5).transpose(1, 2)
+    assert not non_contiguous.is_contiguous()
+    assert torch.allclose(
+        merge_heads(split_heads(non_contiguous, 4)),
+        non_contiguous,
+    )
     assert mha_parameter_count(TinyMultiHeadAttention(16, 4)) == 1088
 
 
@@ -82,11 +108,19 @@ def test_synthetic_task_batches_have_next_token_alignment():
 
     inputs, next_tokens = make_pattern_batch(3, 7, 12)
     assert torch.equal((inputs + 1) % 12, next_tokens)
+    with pytest.raises(ValueError, match="vocab_size"):
+        make_copy_batch(3, 5, 3)
+    with pytest.raises(ValueError, match="vocab_size"):
+        make_pattern_batch(3, 7, 1)
 
 
 def test_kv_cache_matches_full_attention():
     assert compare_full_and_cached() < 1e-6
     assert projection_token_work(7) == (28, 7)
+    with pytest.raises(ValueError, match="positive"):
+        projection_token_work(0)
+    with pytest.raises(ValueError, match="exactly one new token"):
+        CachedSelfAttention(16).step(torch.randn(2, 3, 16))
 
 
 def test_modern_blocks_preserve_expected_shapes():
@@ -108,6 +142,8 @@ def test_moe_routes_every_token_to_top_k_experts():
     assert routes.shape == (2, 5, 2)
     assert sum(counts) == 20
     assert torch.isfinite(auxiliary_loss)
+    with pytest.raises(ValueError, match="d_model"):
+        TopKMoE(top_k=2)(torch.randn(2, 5, 7))
 
 
 def test_lora_starts_equal_to_base_and_can_fuse():
@@ -123,6 +159,11 @@ def test_lora_starts_equal_to_base_and_can_fuse():
     assert grad_a == 0.0
     assert grad_b > 0.0
 
+    double_base = torch.nn.Linear(6, 4, dtype=torch.float64)
+    double_lora = LoRALinear(double_base, rank=2, alpha=4.0)
+    assert double_lora.lora_a.dtype == double_base.weight.dtype
+    assert double_lora.lora_a.device == double_base.weight.device
+
 
 def test_mha_mqa_gqa_share_one_implementation():
     x = torch.randn(2, 5, 32)
@@ -136,11 +177,19 @@ def test_mha_mqa_gqa_share_one_implementation():
         assert cache[0].shape[1] == module.num_kv_heads
         assert weights.shape == (2, 8, 5, 5)
 
+        _, _, fully_masked = module(
+            x,
+            torch.zeros(1, 1, 5, 5, dtype=torch.bool),
+        )
+        assert torch.count_nonzero(fully_masked) == 0
+
     assert (
         mha.kv_cache_elements_per_token()
         > gqa.kv_cache_elements_per_token()
         > mqa.kv_cache_elements_per_token()
     )
+    with pytest.raises(ValueError, match="positive"):
+        GroupedQuerySelfAttention(32, 8, 0)
 
 
 def test_dense_sparse_and_shared_expert_moe_shapes():
@@ -155,3 +204,7 @@ def test_dense_sparse_and_shared_expert_moe_shapes():
     assert dense_weights.shape == (2, 5, 4)
     assert routes.shape == shared_routes.shape == (2, 5, 2)
     assert sum(counts) == sum(shared_counts) == 20
+    with pytest.raises(ValueError, match="positive"):
+        DenseMoE(num_experts=0)
+    with pytest.raises(ValueError, match="positive"):
+        SharedExpertSparseMoE(num_shared_experts=0)

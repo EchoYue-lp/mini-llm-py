@@ -2,8 +2,9 @@
 
 Exercises after running this module:
 1. Change ``num_heads`` from 2 to 4 and update the expected head dimension.
-2. Use a boolean mask to select only positive values from an array.
-3. Compare ``reshape`` with ``transpose`` and explain why they are different.
+2. Predict the shape of ``[3,1,5] + [4,1]`` before running the operation.
+3. Subtract shapes ``[3]`` and ``[3,1]`` and explain the unexpected result.
+4. Compare ``reshape`` with ``transpose`` and explain why they are different.
 """
 
 from __future__ import annotations
@@ -58,6 +59,16 @@ def run_demo() -> None:
     feature_scale = np.array([1.0, 0.1, 10.0, -1.0], dtype=np.float32)
     broadcast_output = hidden * feature_scale
     assert broadcast_output.shape == hidden.shape
+    broadcast_view = np.broadcast_to(feature_scale, hidden.shape)
+    assert broadcast_view.strides[:2] == (0, 0)
+    assert not broadcast_view.flags.writeable
+
+    matrix = np.arange(3 * 4, dtype=np.float32).reshape(3, 4)
+    row_bias = np.arange(4, dtype=np.float32)
+    column_bias = np.arange(3, dtype=np.float32).reshape(3, 1)
+    assert (matrix + row_bias).shape == (3, 4)
+    assert (matrix + column_bias).shape == (3, 4)
+    assert (np.ones((3, 1, 5)) + np.ones((4, 1))).shape == (3, 4, 5)
 
     weight = np.arange(5 * 4, dtype=np.float32).reshape(5, 4) / 10
     bias = np.arange(5, dtype=np.float32)
@@ -79,7 +90,14 @@ def run_demo() -> None:
 
     print("hidden:", hidden.shape, hidden.dtype)
     print("broadcast scale:", feature_scale.shape, "->", broadcast_output.shape)
-    print("linear projection: [2,3,4] @ [5,4].T ->", projected.shape)
+    print("broadcast view strides (NumPy bytes):", broadcast_view.strides)
+    print(
+        "row/column bias results:",
+        (matrix + row_bias).shape,
+        (matrix + column_bias).shape,
+    )
+    print("bidirectional broadcast: [3,1,5] + [4,1] -> [3,4,5]")
+    print("linear projection: X [2,3,4] @ W.T [4,5] ->", projected.shape)
     print("split heads:", heads.shape, "merge heads:", restored.shape)
     print("stable softmax:", probabilities.round(4).tolist())
     print("padding mask:\n", padding_mask)

@@ -11,6 +11,19 @@ Decoder-Only 模型只使用 causal self-attention，GPT 类模型属于这一�
 3. 比较 Greedy、Temperature、Top-K、Top-P 与 Beam Search。
 4. 说明训练并行与自回归生成串行的原因。
 
+## 本章符号与 Shape
+
+| 符号 | 含义 | 典型 Tensor |
+| --- | --- | --- |
+| `B` | batch size | input ids `[B,T]` |
+| `T` | 当前上下文长度 | hidden `[B,T,D]` |
+| `D` | model dimension | 每个 token 的 hidden state |
+| `V` | vocabulary size | logits `[B,T,V]` |
+| `N` | 未被 ignore 的有效 target 数 | loss reduction 的分母 |
+
+生成时通常只读取 `logits[:, -1, :]`，shape 是 `[B,V]`；训练时则同时监督多个位置，并将
+`[B,T,V]` 与 `[B,T]` 展平为 `[B*T,V]` 和 `[B*T]`，但对应顺序必须保持一致。
+
 ## 训练数据
 
 连续 token 被切成固定长度序列：

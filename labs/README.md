@@ -22,6 +22,23 @@ shape、数值、梯度或等价性断言把结论固定下来。
 | 10 MHA/MQA/GQA | KV 共享节省了什么 | 参数量、compact cache、展开语义 |
 | 11 MoE Variants | Dense/Sparse/Shared 如何取舍 | 激活 expert、权重质量、expert 梯度 |
 
+## 所有 Lab 共用的运行合同
+
+这些实验会主动拒绝一部分“shape 看似能算、语义其实错误”的输入：
+
+| 合同 | 约定 |
+| --- | --- |
+| token ids | shape `[B,T]`，dtype 为 `torch.long` |
+| hidden state | 最后一维必须等于模块配置的 `D` |
+| Attention mask | `torch.bool`，`True` 表示 visible，且能广播到 score |
+| fully masked row | 教学 Attention 定义为全零权重，生产数据仍应避免意外出现 |
+| KV cache step | 每次只追加一个 `[B,1,D]` token，K/V shape 必须一致 |
+| generation length | prompt 加新增 token 不能超过位置表上限 |
+| train/eval mode | 生成函数临时切到 eval，并在结束后恢复调用前模式 |
+
+Fail-fast 检查把错误固定在最接近根因的位置。错误 mask 如果不在 Attention 入口拒绝，可能在
+多层广播后才表现为概率异常；超过位置表如果不在生成入口拒绝，可能在生成中途才出现索引错误。
+
 ## Lab 00：位置表示
 
 运行：
@@ -35,6 +52,8 @@ python -m labs.lab00_positional_encoding
 - 正弦位置是固定函数，learned position 是参数表。
 - 一对 `[sin(pw), cos(pw)]` 平移位置等价于二维旋转。
 - RoPE 改变 Q/K 相位但保持每对向量范数。
+
+Lab 还验证奇数 `d_model` 的正弦表 shape，并在 learned position 超过 `max_len` 时明确报错。
 
 建议修改：位置长度、奇数 `d_model`、RoPE offset。故意把 sin/cos 赋值长度写错，观察奇数
 维度错误。
@@ -56,6 +75,9 @@ future causal weights == 0
 softmax axis == key axis
 ```
 
+全屏蔽行没有合法概率分布。Lab 将其教学语义定义为全零权重，并拒绝非布尔 mask；生产代码仍应
+追查 padding、query 有效性和 mask 合并逻辑，不能只把 `NaN` 替换掉。
+
 ## Lab 02：Multi-Head Shape
 
 ```bash
@@ -63,7 +85,8 @@ python -m labs.lab02_multi_head_attention
 ```
 
 `transpose` 后 head Tensor 通常不 contiguous。Lab 打印 stride，并验证合并前需要恢复逻辑
-顺序。固定 D 时增加 head 数不会增加 Q/K/V/O 总参数量。
+顺序。它还让 non-contiguous 输入完成 split/merge round-trip，避免实现无条件假设调用方传入
+连续内存。固定 D 时增加 head 数不会增加 Q/K/V/O 总参数量。
 
 建议尝试 `D=12,H=3/4/5`，分别解释合法 shape 和失败原因。
 
@@ -95,6 +118,9 @@ Copy Task 用确定目标隔离训练管线问题。Lab 断言 decoder input 与
 诊断顺序：先确认一个 batch 能过拟合，再增加 padding、不同 source/target 长度和 Beam
 Search。
 
+教学版 `greedy_copy` 明确只接受 source shape `[1,S]`，并在生成长度超过 target position table
+前报错。扩展到 batch decode 时，应维护每条序列独立的 finished 状态。
+
 ## Lab 05：Tiny Decoder-Only LM
 
 ```bash
@@ -109,6 +135,9 @@ next_token = (current_token + 1) % vocab_size
 
 因此可以逐元素验证 labels，而不是只观察 loss 下降。若生成错误，分别检查 shift、causal
 mask、最后位置 logits 和 train/eval 状态。
+
+`generate` 检查 token dtype、prompt shape 和位置表上限，并在临时 `eval()` 后恢复模型原来的
+training flag。`torch.no_grad()` 只关闭计算图，不会自动关闭 Dropout。
 
 ## Lab 06：KV Cache
 
@@ -125,6 +154,9 @@ Lab 验证每一步 cache length 恰好增加 1，并比较：
 
 这不表示 decode 变成常数成本；当前 Q 仍需读取全部历史 K/V。Lab 使用 `torch.cat` 是教学
 写法，生产实现应预分配或分页。
+
+`CachedSelfAttention.step` 只接受 `[B,1,D]`。一次传入多个新 token 需要矩形 causal mask，不能
+直接复用“当前 query 可读取整个 cache”的单 token 逻辑。
 
 ## Lab 07：现代 Block 组件
 
@@ -165,6 +197,9 @@ eval dynamic adapter ~= fused Linear
 
 Optimizer 只接收 `requires_grad=True` 的 A/B 参数，不把冻结基座混入参数集合。
 
+LoRA A/B 从基座 Linear 继承 device 与 dtype。否则在 CUDA、MPS 或 FP16/BF16 基座上包装 LoRA
+时，会在第一次 forward 才暴露跨设备或类型不一致。
+
 ## Lab 10：MHA、MQA 与 GQA
 
 ```bash
@@ -181,6 +216,9 @@ MHA > GQA > MQA
 ```
 
 这里比较的是 K/V projection 参数与 cache，不代表全模型所有参数同比例下降。
+
+MHA/MQA/GQA 共用 Lab 01 的稳定 masked attention，因此 mask dtype、广播合同和全屏蔽行语义
+保持一致，避免三个变体各自实现出不同边界行为。
 
 ## Lab 11：MoE 变体
 

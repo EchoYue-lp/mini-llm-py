@@ -32,14 +32,33 @@ def fail(location: str, message: str) -> None:
 
 
 def validate_answer(answer: dict[str, Any], location: str) -> None:
+    if not isinstance(answer, dict):
+        fail(location, "assistant answer must be a JSON object")
     if set(answer) != FIELDS:
         fail(location, f"fields must be exactly {sorted(FIELDS)}")
+    if not isinstance(answer["action"], str):
+        fail(location, "action must be a string")
     if answer["action"] not in ACTIONS:
         fail(location, f"invalid action {answer['action']!r}")
+    if not isinstance(answer["intent"], str) or not answer["intent"].strip():
+        fail(location, "intent must be a non-empty string")
+    if answer["tool"] is not None and not isinstance(answer["tool"], str):
+        fail(location, "tool must be a string or null")
     if not isinstance(answer["arguments"], dict):
         fail(location, "arguments must be an object")
+    invalid_argument_values = {
+        key: value
+        for key, value in answer["arguments"].items()
+        if not isinstance(value, str) or not value.strip()
+    }
+    if invalid_argument_values:
+        fail(location, "tool argument values must be non-empty strings")
     if not isinstance(answer["missing_arguments"], list):
         fail(location, "missing_arguments must be a list")
+    if any(not isinstance(item, str) for item in answer["missing_arguments"]):
+        fail(location, "missing_arguments entries must be strings")
+    if len(answer["missing_arguments"]) != len(set(answer["missing_arguments"])):
+        fail(location, "missing_arguments cannot contain duplicates")
     unknown_missing = set(answer["missing_arguments"]) - MISSING_ARGUMENTS
     if unknown_missing:
         fail(location, f"unknown missing arguments: {sorted(unknown_missing)}")
@@ -80,22 +99,36 @@ def main() -> None:
             for line_number, line in enumerate(file, start=1):
                 location = f"{path.name}:{line_number}"
                 record = json.loads(line)
+                if not isinstance(record, dict):
+                    fail(location, "record must be a JSON object")
                 messages = record.get("messages")
                 if not isinstance(messages, list) or len(messages) != 3:
                     fail(location, "messages must contain system, user, assistant")
+                if any(not isinstance(message, dict) for message in messages):
+                    fail(location, "every message must be an object")
                 if [message.get("role") for message in messages] != [
                     "system",
                     "user",
                     "assistant",
                 ]:
                     fail(location, "unexpected chat roles")
+                for message in messages:
+                    content = message.get("content")
+                    if not isinstance(content, str) or not content.strip():
+                        fail(location, f"{message['role']} content must be non-empty")
                 user_text = messages[1].get("content")
-                if not isinstance(user_text, str) or not user_text.strip():
-                    fail(location, "user content must be non-empty")
-                if user_text in seen:
-                    fail(location, f"duplicate user text also found in {seen[user_text]}")
-                seen[user_text] = location
-                answer = json.loads(messages[2]["content"])
+                normalized_user_text = user_text.strip()
+                if normalized_user_text in seen:
+                    fail(
+                        location,
+                        "duplicate user text also found in "
+                        f"{seen[normalized_user_text]}",
+                    )
+                seen[normalized_user_text] = location
+                try:
+                    answer = json.loads(messages[2]["content"])
+                except json.JSONDecodeError as error:
+                    fail(location, f"assistant content is not valid JSON: {error.msg}")
                 validate_answer(answer, location)
                 action_counts[answer["action"]] += 1
                 total += 1

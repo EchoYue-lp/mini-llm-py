@@ -9,6 +9,30 @@
 3. 解释 causal、padding 和 cross-attention mask 的区别。
 4. 定位 mask 广播、布尔语义和 NaN 问题。
 
+## 本章符号与 Shape
+
+| 符号 | 含义 |
+| --- | --- |
+| `B` | batch size |
+| `H` | attention head 数；单头示例中可省略 |
+| `Tq` | query 序列长度，决定输出有多少行 |
+| `Tk` | key/value 序列长度，决定每行分布有多少列 |
+| `Dh` | query/key 的 head dimension |
+| `Dv` | value 的特征宽度，标准 self-attention 中通常等于 `Dh` |
+
+完整多头合同是：
+
+```text
+Q       [B,H,Tq,Dh]
+K       [B,H,Tk,Dh]
+V       [B,H,Tk,Dv]
+scores  [B,H,Tq,Tk]
+output  [B,H,Tq,Dv]
+```
+
+因此 Q/K 最后一维必须相等，K/V 的 `Tk` 必须相等；`Tq` 与 `Tk` 可以不同，这正是
+cross-attention 和增量解码中常见的情况。
+
 ## 核心公式
 
 ```text

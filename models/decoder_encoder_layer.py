@@ -4,12 +4,11 @@ from .layers import MultiHeadAttention, PositionwiseFeedForward
 
 class DecoderLayer(nn.Module):
     """
-    Decoder Layer with Pre-LN architecture (Layer Normalization before sublayers)
+    Decoder layer with Pre-LN self-attention, optional cross-attention, and FFN.
 
-    Pre-LN 架构优势:
-    - 训练更稳定，梯度流动更顺畅
-    - 不容易出现梯度爆炸
-    - 通常不需要学习率 warmup
+    Input/output shape is [B,T,D]. Pre-LN preserves an explicit residual
+    identity path, which often improves deep-network optimization. It does not
+    guarantee that warmup, gradient clipping, or other controls are unnecessary.
     """
     def __init__(self, d_model, num_heads, d_ff, dropout=0.1):
         super().__init__()
@@ -48,12 +47,10 @@ class DecoderLayer(nn.Module):
 
 class EncoderLayer(nn.Module):
     """
-    Encoder Layer with Pre-LN architecture (Layer Normalization before sublayers)
+    Encoder layer with Pre-LN self-attention and a position-wise FFN.
 
-    Pre-LN 架构优势:
-    - 训练更稳定，梯度流动更顺畅
-    - 不容易出现梯度爆炸
-    - 通常不需要学习率 warmup
+    Input/output shape is [B,T,D]. Padding masks operate on key positions;
+    padded query outputs are normally removed from the loss separately.
     """
     def __init__(self, d_model, num_heads, d_ff, dropout=0.1):
         super().__init__()

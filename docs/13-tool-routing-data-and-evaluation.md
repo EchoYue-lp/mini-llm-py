@@ -31,6 +31,27 @@
 - `arguments`
 - `missing_arguments`
 
+### 字段类型与跨字段合同
+
+| 字段 | 类型 | 约束 |
+| --- | --- | --- |
+| `action` | string enum | `call_tool/ask_clarification/no_tool` |
+| `intent` | non-empty string | 描述业务意图，不等同于工具名 |
+| `tool` | string 或 null | 只有 `call_tool` 时允许非 null |
+| `arguments` | JSON object | key 必须属于工具签名，value 为非空字符串 |
+| `missing_arguments` | string list | 不重复，只描述当前动作真正缺少的信息 |
+
+Schema 校验不能只验证“字段存在”。下面三个对象字段类型都合法，但只有第一个跨字段一致：
+
+```text
+call_tool        -> tool 非空、arguments 完整、missing_arguments 为空
+ask_clarification -> tool=null、arguments={}、missing_arguments 非空
+no_tool          -> tool=null、arguments={}、missing_arguments 为空
+```
+
+如果只做 JSON Schema 的独立字段类型检查，就可能放过“`no_tool` 却携带取消订单参数”这类业务上
+矛盾的输出。因此数据生成、训练前校验和评测解析应共享同一组跨字段不变量。
+
 ## 三类动作
 
 | 行为 | action | 示例 |

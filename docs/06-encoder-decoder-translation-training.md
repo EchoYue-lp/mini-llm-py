@@ -11,6 +11,20 @@ Encoder-Decoder 适合 source 和 target 不同的任务，例如机器翻译。
 3. 解释 teacher forcing、next-token shift 和 exposure bias。
 4. 区分训练 loss、生成质量和翻译评测。
 
+## 本章符号与 Shape
+
+| 符号 | 含义 | 典型 Tensor |
+| --- | --- | --- |
+| `B` | batch size | source ids `[B,Ts]` |
+| `Ts` | source 序列长度 | encoder memory `[B,Ts,D]` |
+| `Tt` | target/decoder 序列长度 | decoder hidden `[B,Tt,D]` |
+| `D` | model dimension | cross-attention Q/K/V 特征宽度 |
+| `Vs/Vt` | source/target 词表大小 | target logits `[B,Tt,Vt]` |
+
+Cross-attention 中 Q 来自 decoder `[B,H,Tt,Dh]`，K/V 来自 encoder
+`[B,H,Ts,Dh]`，所以 score 是 `[B,H,Tt,Ts]`。不要用一个模糊的 `T` 同时代表 source 与
+target 长度。
+
 ## 数据流
 
 ```text

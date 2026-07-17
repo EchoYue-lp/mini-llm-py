@@ -11,6 +11,21 @@
 3. 区分 final、best、periodic checkpoint。
 4. 根据 train/validation/task metrics 判断训练状态。
 
+## 本章符号与训练单位
+
+| 符号/单位 | 含义 |
+| --- | --- |
+| `B` | micro-batch 中的样本数 |
+| `T` | padding 后序列长度 |
+| `V` | 词表大小，logits 最后一维 |
+| `Nsup` | 当前 batch 中真正参与 loss 的 assistant target 数 |
+| `G` | gradient accumulation steps |
+| optimizer step | 累积完成后真正更新一次参数 |
+| validation event | 完整运行一次验证；不一定等于一个 epoch |
+
+`B*G` 只是在样本数层面的有效 batch 近似。若每条样本监督 token 数不同，严格的梯度平均还要
+按 `Nsup` 加权；否则短答案和长答案对一次更新的贡献会因 micro-batch 划分而改变。
+
 ## Chat 数据与 Prompt Mask
 
 每条记录：

@@ -11,6 +11,20 @@ Mixture-of-Experts 通常替换 Transformer 的 FFN 子层，不替换 Attention
 3. 计算 expert capacity 并解释 overflow。
 4. 识别 router collapse、负载不均和通信瓶颈。
 
+## 本章符号与 Shape
+
+| 符号 | 含义 |
+| --- | --- |
+| `B,T,D` | 输入 batch、token 长度、hidden width |
+| `N` | 路由 token 数，通常 `N=B*T`，排除项必须明确 |
+| `E` | routed expert 数量 |
+| `K` | 每个 token 选择的 expert 数 |
+| `F` | 单个 expert 的 FFN 中间宽度 |
+| `C` | 每个 expert 的 capacity |
+
+Router 接收 flatten 后的 `[N,D]`，输出概率 `[N,E]`；Top-K indices/weights 为 `[N,K]`；
+combine 后必须恢复原来的 `[B,T,D]`。`N*K` 是 assignment 数，不等于唯一 token 数。
+
 ```text
 x = x + Attention(Norm(x))
 x = x + MoE(Norm(x))

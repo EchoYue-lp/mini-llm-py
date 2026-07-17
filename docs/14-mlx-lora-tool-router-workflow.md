@@ -12,6 +12,23 @@
 3. 加载 adapter 推理并运行固定测试集评测。
 4. 根据错误信息定位模型、数据、目标层、内存和 adapter 问题。
 
+## 本章产物合同
+
+端到端流程不是“一条命令生成一个模型”，而是四类带依赖关系的产物：
+
+| 产物 | 必须记录的身份信息 |
+| --- | --- |
+| base snapshot | model id、本地路径、revision、tokenizer/chat template |
+| dataset split | 生成脚本版本、system prompt、train/valid/test 内容 |
+| adapter | base identity、目标层、rank/alpha、训练配置、权重文件 |
+| evaluation report | 模型/adapter 标签、测试集、解析规则、生成参数、逐样本输出 |
+
+Adapter 不是独立模型文件。只有加载到训练时同一个 base architecture、权重 revision 和目标模块
+命名上，它的 A/B 更新才有确定含义。同样，两个报告只有在 test split、chat template、sampler、
+`max_tokens` 和 JSON 解析规则一致时才可比较。
+
+后文每个阶段都应回答三个问题：输入产物是什么、输出写到哪里、通过什么 gate 才进入下一阶段。
+
 ## 环境
 
 ```bash

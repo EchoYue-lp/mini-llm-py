@@ -11,6 +11,20 @@ LoRA 在冻结的线性层旁增加低秩更新，只训练少量参数。
 3. 分析 rank、alpha、dropout 和目标层的影响。
 4. 说明 adapter 保存、加载和 fuse 所需的信息。
 
+## 本章符号与 Shape
+
+| 符号 | 含义 |
+| --- | --- |
+| `Din` | 基座 Linear 输入宽度 |
+| `Dout` | 基座 Linear 输出宽度 |
+| `r` | LoRA rank，通常远小于 `Din/Dout` |
+| `alpha` | LoRA 缩放超参数 |
+| `x` | 任意前导轴加输入特征，shape `[...,Din]` |
+
+本章示例采用 `A:[Din,r]`、`B:[r,Dout]`，因此动态分支是 `x@A@B`。其他库可能把 A/B
+命名或存储方向反过来；判断实现是否正确必须以实际 forward 和基座权重 `[Dout,Din]` 为准，
+不能只看变量名。
+
 ## 核心公式
 
 基座线性层：

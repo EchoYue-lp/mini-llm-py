@@ -10,13 +10,23 @@ import torch.nn.functional as F
 class LoRALinear(nn.Module):
     def __init__(self, linear, rank=4, alpha=8.0):
         super().__init__()
+        if not isinstance(linear, nn.Linear):
+            raise TypeError("linear must be an nn.Linear instance")
+        if rank <= 0:
+            raise ValueError("rank must be positive")
+        if alpha <= 0:
+            raise ValueError("alpha must be positive")
         self.linear = linear
         self.linear.requires_grad_(False)
         self.scale = alpha / rank
         input_dim = linear.in_features
         output_dim = linear.out_features
-        self.lora_a = nn.Parameter(torch.empty(input_dim, rank))
-        self.lora_b = nn.Parameter(torch.zeros(rank, output_dim))
+        factory_kwargs = {
+            "device": linear.weight.device,
+            "dtype": linear.weight.dtype,
+        }
+        self.lora_a = nn.Parameter(torch.empty(input_dim, rank, **factory_kwargs))
+        self.lora_b = nn.Parameter(torch.zeros(rank, output_dim, **factory_kwargs))
         nn.init.kaiming_uniform_(self.lora_a, a=math.sqrt(5))
 
     def forward(self, x):
@@ -82,7 +92,12 @@ def run_demo():
     print("initial LoRA/base difference:", initial_difference)
     print("initial A/B gradient norms:", initial_a_grad, initial_b_grad)
     print("trainable parameters:", sum(p.numel() for p in lora.parameters() if p.requires_grad))
-    print("Delta-W rank bound:", torch.linalg.matrix_rank(lora.delta_weight().float()).item(), "<=", lora.lora_a.size(1))
+    print(
+        "Delta-W rank bound:",
+        torch.linalg.matrix_rank(lora.delta_weight().float()).item(),
+        "<=",
+        lora.lora_a.size(1),
+    )
     print("LoRA/fused difference:", fused_difference)
     return initial_difference, fused_difference
 

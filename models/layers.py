@@ -5,17 +5,35 @@ import math
 class ScaledDotProductAttention(nn.Module):
     def __init__(self, d_k, dropout=0.1):
         super().__init__()
+        if d_k <= 0:
+            raise ValueError("d_k must be positive")
         self.d_k = d_k
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, Q, K, V, mask=None):
         # Q, K, V: (batch, head, seq_len, d_k)
+        if min(Q.ndim, K.ndim, V.ndim) < 3:
+            raise ValueError("Q, K, and V must have shape [...,T,D]")
+        if Q.size(-1) != self.d_k or K.size(-1) != self.d_k:
+            raise ValueError("Q/K feature width must match configured d_k")
+        if V.size(-1) != self.d_k:
+            raise ValueError("this teaching implementation requires V width == d_k")
+        if K.size(-2) != V.size(-2):
+            raise ValueError("K and V sequence lengths must match")
         scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
         if mask is not None:
-            scores = scores.masked_fill(mask == 0, float('-inf'))
+            if mask.dtype != torch.bool:
+                raise TypeError("mask must be boolean with True meaning visible")
+            if mask.device != scores.device:
+                raise ValueError("mask and scores must be on the same device")
+            try:
+                torch.broadcast_shapes(scores.shape, mask.shape)
+            except RuntimeError as error:
+                raise ValueError("mask is not broadcastable to attention scores") from error
+            scores = scores.masked_fill(~mask, float('-inf'))
         attn = torch.softmax(scores, dim=-1)
-        # 修复数值稳定性：处理全 padding 导致的 NaN
-        attn = attn.masked_fill(torch.isnan(attn), 0.0)
+        # A fully masked row has no probability distribution; define it as zeros.
+        attn = torch.nan_to_num(attn, nan=0.0)
         # 在 attention weights 上应用 dropout（训练时随机丢弃部分注意力连接）
         attn_dropped = self.dropout(attn)
         output = torch.matmul(attn_dropped, V)
@@ -25,7 +43,11 @@ class ScaledDotProductAttention(nn.Module):
 class MultiHeadAttention(nn.Module):
     def __init__(self, d_model, num_heads, dropout=0.1):
         super().__init__()
-        assert d_model % num_heads == 0
+        if d_model <= 0 or num_heads <= 0:
+            raise ValueError("d_model and num_heads must be positive")
+        if d_model % num_heads != 0:
+            raise ValueError("d_model must be divisible by num_heads")
+        self.d_model = d_model
         self.d_k = d_model // num_heads
         self.num_heads = num_heads
         self.q_linear = nn.Linear(d_model, d_model)
@@ -37,11 +59,19 @@ class MultiHeadAttention(nn.Module):
         # attention weights 上已经应用了 dropout
 
     def forward(self, Q, K, V, mask=None):
+        if any(tensor.ndim != 3 for tensor in (Q, K, V)):
+            raise ValueError("Q, K, and V must have shape [B,T,D]")
+        if any(tensor.size(-1) != self.d_model for tensor in (Q, K, V)):
+            raise ValueError("Q, K, and V feature width must equal d_model")
+        if Q.size(0) != K.size(0) or K.size(0) != V.size(0):
+            raise ValueError("Q, K, and V batch sizes must match")
+        if K.size(1) != V.size(1):
+            raise ValueError("K and V sequence lengths must match")
         batch_size = Q.size(0)
         seq_len = Q.size(1)
         # 线性变换并分头
         def transform(x):
-            x_proj = x.view(x.size(0), x.size(1), self.num_heads, self.d_k)  # (batch, seq_len, num_heads, d_k)
+            x_proj = x.reshape(x.size(0), x.size(1), self.num_heads, self.d_k)
             return x_proj.permute(0, 2, 1, 3)  # (batch, num_heads, seq_len, d_k)
         Q = transform(self.q_linear(Q))
         K = transform(self.k_linear(K))
@@ -57,6 +87,8 @@ class MultiHeadAttention(nn.Module):
 class PositionwiseFeedForward(nn.Module):
     def __init__(self, d_model, d_ff, dropout=0.1):
         super().__init__()
+        if d_model <= 0 or d_ff <= 0:
+            raise ValueError("d_model and d_ff must be positive")
         self.linear1 = nn.Linear(d_model, d_ff)
         self.linear2 = nn.Linear(d_ff, d_model)
         self.dropout = nn.Dropout(dropout)
@@ -75,6 +107,8 @@ class PositionalEncoding(nn.Module):
     """
     def __init__(self, d_model, max_len=5000, dropout=0.1):
         super().__init__()
+        if d_model <= 0 or max_len <= 0:
+            raise ValueError("d_model and max_len must be positive")
         self.dropout = nn.Dropout(dropout)
 
         # 创建位置编码矩阵 (max_len, d_model)
@@ -123,12 +157,14 @@ class LayerNorm(nn.Module):
     """
     def __init__(self, d_model, eps=1e-6):
         super().__init__()
+        if d_model <= 0 or eps <= 0:
+            raise ValueError("d_model and eps must be positive")
         self.gamma = nn.Parameter(torch.ones(d_model))
         self.beta = nn.Parameter(torch.zeros(d_model))
         self.eps = eps
 
     def forward(self, x):
         mean = x.mean(-1, keepdim=True)
-        # 使用 unbiased=False 以匹配标准 LayerNorm 的行为
-        std = x.std(-1, keepdim=True, unbiased=False)
-        return self.gamma * (x - mean) / (std + self.eps) + self.beta
+        variance = x.var(-1, keepdim=True, unbiased=False)
+        normalized = (x - mean) * torch.rsqrt(variance + self.eps)
+        return self.gamma * normalized + self.beta

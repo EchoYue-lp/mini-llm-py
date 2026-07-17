@@ -66,3 +66,32 @@ def test_clarification_requires_a_missing_reason():
             ),
             "test:5",
         )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"intent": ""}, "intent must be a non-empty string"),
+        ({"tool": 7}, "tool must be a string or null"),
+        (
+            {"arguments": {"city": "", "date": "明天"}},
+            "argument values must be non-empty strings",
+        ),
+        (
+            {"missing_arguments": ["city", "city"]},
+            "cannot contain duplicates",
+        ),
+        (
+            {"missing_arguments": ["city", 7]},
+            "entries must be strings",
+        ),
+    ],
+)
+def test_field_types_and_values_are_validated(overrides, message):
+    with pytest.raises(ValueError, match=message):
+        validate_answer(answer(**overrides), "test:types")
+
+
+def test_answer_must_be_an_object():
+    with pytest.raises(ValueError, match="must be a JSON object"):
+        validate_answer([], "test:object")

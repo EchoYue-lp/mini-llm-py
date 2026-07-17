@@ -12,6 +12,18 @@
 3. 推导 SwiGLU 三个投影的 shape 和参数量。
 4. 阅读模型配置时识别现代 block 的关键差异。
 
+## 本章符号与 Shape
+
+| 符号 | 含义 | 典型 Shape |
+| --- | --- | --- |
+| `B,T,D` | batch、序列长度、residual width | hidden `[B,T,D]` |
+| `H,Dh` | head 数和 head width | Q/K `[B,H,T,Dh]` |
+| `F` | SwiGLU 中间宽度 | gate/up `[B,T,F]` |
+| `Dr` | 实际应用 RoPE 的 rotary dimension | `Dr <= Dh` 且通常为偶数 |
+
+RMSNorm 和 SwiGLU 都保持 block 对外 shape `[B,T,D]`；RoPE 保持 Q/K shape 不变。内部宽度
+`F`、`Dr` 改变参数量和行为，但不能破坏 residual add 的 `D`。
+
 ## 常见替换
 
 | 经典实现 | 现代常见选择 | 目的 |

@@ -12,6 +12,20 @@ Self-Attention 本身不区分 token 顺序。若没有位置表示，交换输�
 3. 写出 RoPE 输入输出 shape 和应用位置。
 4. 区分“公式可计算更长位置”与“模型能泛化到更长上下文”。
 
+## 本章符号与 Shape
+
+| 符号 | 含义 | 典型 Tensor |
+| --- | --- | --- |
+| `B` | batch size | token hidden `[B,T,D]` |
+| `T` | sequence length | position id `[T]` |
+| `D` | model/embedding dimension | position table `[max_len,D]` |
+| `H` | attention head 数 | Q/K `[B,H,T,Dh]` |
+| `Dh` | 每个 head 的宽度，`D=H*Dh` | 每个 RoPE 向量 `[Dh]` |
+| `i` | sin/cos 或旋转对编号 | 坐标 `(2i,2i+1)` |
+
+正弦/learned position 通常产生 `[T,D]` 并广播到 batch；RoPE 不生成要加到 hidden state 的
+`[T,D]`，而是在 Q/K 已拆头后保持 `[B,H,T,Dh]` shape 不变。
+
 ## 正弦位置编码
 
 经典公式：

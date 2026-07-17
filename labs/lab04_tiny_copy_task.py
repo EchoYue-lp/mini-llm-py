@@ -16,6 +16,11 @@ EOS_ID = 2
 
 
 def make_copy_batch(batch_size, content_length, vocab_size, device="cpu"):
+    """Return source, decoder input, and next-token labels for a copy task."""
+    if batch_size <= 0 or content_length <= 0:
+        raise ValueError("batch_size and content_length must be positive")
+    if vocab_size <= EOS_ID + 1:
+        raise ValueError("vocab_size must leave room for PAD/BOS/EOS and content")
     content = torch.randint(
         3, vocab_size, (batch_size, content_length), device=device
     )
@@ -26,19 +31,42 @@ def make_copy_batch(batch_size, content_length, vocab_size, device="cpu"):
 
 
 def greedy_copy(model, source, max_new_tokens):
-    generated = torch.tensor([[BOS_ID]], device=source.device)
-    with torch.no_grad():
-        for _ in range(max_new_tokens):
-            mask = create_causal_mask(generated.size(1), device=source.device)
-            logits, _ = model(source, generated, tgt_mask=mask)
-            next_token = logits[:, -1].argmax(dim=-1, keepdim=True)
-            generated = torch.cat([generated, next_token], dim=1)
-            if next_token.item() == EOS_ID:
-                break
+    """Greedily decode one source sequence, excluding the initial BOS in output."""
+    if source.ndim != 2 or source.size(0) != 1:
+        raise ValueError("greedy_copy currently expects source shape [1,S]")
+    if source.dtype != torch.long:
+        raise TypeError("source token ids must use torch.long")
+    if max_new_tokens < 0:
+        raise ValueError("max_new_tokens must be non-negative")
+    max_target_len = model.tgt_pos_enc.pe.size(1)
+    if 1 + max_new_tokens > max_target_len:
+        raise ValueError("requested generation exceeds target position table")
+
+    generated = torch.full(
+        (1, 1),
+        BOS_ID,
+        dtype=source.dtype,
+        device=source.device,
+    )
+    was_training = model.training
+    model.eval()
+    try:
+        with torch.no_grad():
+            for _ in range(max_new_tokens):
+                mask = create_causal_mask(generated.size(1), device=source.device)
+                logits, _ = model(source, generated, tgt_mask=mask)
+                next_token = logits[:, -1].argmax(dim=-1, keepdim=True)
+                generated = torch.cat([generated, next_token], dim=1)
+                if next_token.item() == EOS_ID:
+                    break
+    finally:
+        model.train(was_training)
     return generated[0, 1:].tolist()
 
 
 def train_copy_task(steps=400, device="cpu"):
+    if steps <= 0:
+        raise ValueError("steps must be positive")
     torch.manual_seed(7)
     vocab_size = 16
     model = EncoderDecoderModel(
