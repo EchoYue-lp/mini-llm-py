@@ -30,7 +30,9 @@ EXPERIMENTS = [
 
 
 METRIC_NAMES = {
-    "json_valid": "JSON合法率",
+    "raw_json_valid": "原始JSON合法率",
+    "extractable_json": "宽松提取率",
+    "schema_valid": "Schema合法率",
     "exact_match": "整条完全正确率",
     "action": "动作准确率",
     "intent": "意图准确率",
@@ -58,11 +60,13 @@ def write_markdown(reports: list[dict[str, Any]]) -> Path:
     lines = [
         "# 模型效果对比",
         "",
-        "> 这是一个只有 5 条测试样本的教学 Demo，用来验证评测流程，不能代表生产效果。",
+        "> 这是一个只有 8 条测试样本的教学 Demo，用来验证评测流程，不能代表生产效果。",
         "",
         "## 如何阅读指标",
         "",
-        "- **JSON合法率**：输出能否被程序解析。",
+        "- **原始JSON合法率**：完整输出能否直接解析为一个 JSON 对象。",
+        "- **宽松提取率**：从首个 `{` 到末个 `}` 的片段能否解析。",
+        "- **Schema合法率**：字段、类型和跨字段业务约束是否全部满足。",
         "- **整条完全正确率**：动作、意图、工具、参数和缺参列表全部正确。",
         "- **动作准确率**：是否正确选择调用工具、追问或不调用。",
         "- **意图准确率**：业务意图是否正确。",
@@ -79,14 +83,27 @@ def write_markdown(reports: list[dict[str, Any]]) -> Path:
         values = [f"{report['metrics'][item]:.0%}" for item in metrics]
         lines.append(f"| {report['label']} | " + " | ".join(values) + " |")
 
+    best_exact = max(report["metrics"]["exact_match"] for report in reports)
+    best_labels = [
+        report["label"]
+        for report in reports
+        if report["metrics"]["exact_match"] == best_exact
+    ]
+    extraction_gaps = [
+        report["label"]
+        for report in reports
+        if report["metrics"]["extractable_json"]
+        > report["metrics"]["raw_json_valid"]
+    ]
     lines.extend(
         [
             "",
             "## 直观结论",
             "",
-            "- 基座模型能够输出 JSON，但没有稳定遵守本项目的意图和动作定义。",
-            "- 短训练已经学到部分标签和工具格式，但可能产生非法 JSON。",
-            "- 长训练的整条正确率更高，但仍会在缺参判断上犯错。",
+            f"- 整条完全正确率最高：{', '.join(best_labels)}（{best_exact:.0%}）。",
+            "- 存在宽松可提取但并非原始 JSON 的模型："
+            + (", ".join(extraction_gaps) if extraction_gaps else "无")
+            + "。",
             "- 训练损失接近 0 不等于测试集全对，需要独立评测和更丰富的数据。",
             "",
             "## 逐条对比",
@@ -145,7 +162,9 @@ def main() -> None:
         )
 
     columns = [
-        "json_valid",
+        "raw_json_valid",
+        "extractable_json",
+        "schema_valid",
         "exact_match",
         "action",
         "intent",

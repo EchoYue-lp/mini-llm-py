@@ -27,7 +27,27 @@ def validate_dataset(data, max_len, dataset_name="dataset"):
     status = f"✓" if over_limit == 0 else f"⚠ {over_limit} 条超长"
     print(f"{dataset_name}: {len(data):,} 条, 平均 {avg_len:.1f} tokens, 最大 {max_seq_len} [{status}]")
 
-def collate_fn_with_padding(src_batch, tgt_batch, pad_token_id=0, max_seq_len=1024):
+def truncate_sequence(sequence, max_seq_len, eos_token_id=None):
+    """Truncate a token sequence without dropping a trailing EOS token."""
+    if max_seq_len < 2:
+        raise ValueError("max_seq_len must be at least 2")
+    truncated = list(sequence[:max_seq_len])
+    if (
+        len(sequence) > max_seq_len
+        and eos_token_id is not None
+        and sequence[-1] == eos_token_id
+    ):
+        truncated[-1] = eos_token_id
+    return truncated
+
+
+def collate_fn_with_padding(
+    src_batch,
+    tgt_batch,
+    pad_token_id=0,
+    max_seq_len=1024,
+    tgt_eos_token_id=None,
+):
     """
     动态 padding collate function for encoder-decoder
     将不同长度的源和目标序列分别 pad 到各自 batch 内最大长度
@@ -37,30 +57,17 @@ def collate_fn_with_padding(src_batch, tgt_batch, pad_token_id=0, max_seq_len=10
         tgt_batch: List[List[int]] - 目标语言序列列表
         pad_token_id: padding token 的 id
         max_seq_len: 最大序列长度，超过此长度的序列会被截断（防御性编程）
+        tgt_eos_token_id: 目标序列 EOS id；设置后截断仍保留末尾 EOS
 
     Returns:
         src_tensor: (batch, src_max_len) - padding 后的源序列
         tgt_tensor: (batch, tgt_max_len) - padding 后的目标序列
     """
-    # 截断过长的序列（业界标准做法：防御性编程）
-    src_batch = [x[:max_seq_len] if len(x) > max_seq_len else x for x in src_batch]
-    tgt_batch = [x[:max_seq_len] if len(x) > max_seq_len else x for x in tgt_batch]
-
-    # 找到各自的最大长度
-    src_max_len = max(len(x) for x in src_batch)
-    tgt_max_len = max(len(x) for x in tgt_batch)
-
-    # 创建 padding 后的 tensor
-    src_tensor = torch.full((len(src_batch), src_max_len), pad_token_id, dtype=torch.long)
-    tgt_tensor = torch.full((len(tgt_batch), tgt_max_len), pad_token_id, dtype=torch.long)
-
-    # 填充每个序列
-    for i, seq in enumerate(src_batch):
-        src_tensor[i, :len(seq)] = torch.tensor(seq, dtype=torch.long)
-    for i, seq in enumerate(tgt_batch):
-        tgt_tensor[i, :len(seq)] = torch.tensor(seq, dtype=torch.long)
-
-    return src_tensor, tgt_tensor
+    src_batch = [truncate_sequence(x, max_seq_len) for x in src_batch]
+    tgt_batch = [
+        truncate_sequence(x, max_seq_len, tgt_eos_token_id) for x in tgt_batch
+    ]
+    return collate_fn_mt(src_batch, tgt_batch, pad_token_id)
 
 def test_translation_demo(model, tokenizer, demo_sentences, device):
     """在每个 epoch 结束时测试翻译效果"""
@@ -110,6 +117,7 @@ def train_encoder_decoder(
     from torch.utils.tensorboard import SummaryWriter
     from utils.sentencepiece_tokenizer import SentencePieceTokenizer
     from utils.checkpoint_utils import (
+        capture_rng_state,
         get_checkpoint_config,
         get_checkpoint_training_config,
         load_checkpoint_for_training,
@@ -164,6 +172,15 @@ def train_encoder_decoder(
         else:
             val_src, val_tgt = src_data, tgt_data
 
+    if len(train_src) != len(train_tgt):
+        raise ValueError(
+            f"训练集源/目标样本数不一致: {len(train_src)} != {len(train_tgt)}"
+        )
+    if len(val_src) != len(val_tgt):
+        raise ValueError(
+            f"验证集源/目标样本数不一致: {len(val_src)} != {len(val_tgt)}"
+        )
+
     # 数据验证
     validate_dataset(train_src, max_len, "训练集 (源)")
     validate_dataset(train_tgt, max_len, "训练集 (目标)")
@@ -179,7 +196,8 @@ def train_encoder_decoder(
             [x[0] for x in batch],
             [x[1] for x in batch],
             pad_token_id,
-            max_len
+            max_len,
+            tokenizer.eos_token_id,
         )
     )
     val_loader = DataLoader(
@@ -190,7 +208,8 @@ def train_encoder_decoder(
             [x[0] for x in batch],
             [x[1] for x in batch],
             pad_token_id,
-            max_len
+            max_len,
+            tokenizer.eos_token_id,
         )
     )
     model = EncoderDecoderModel(
@@ -231,11 +250,8 @@ def train_encoder_decoder(
     if use_scheduler:
         updates_per_epoch = math.ceil(len(train_loader) / gradient_accumulation_steps)
         scheduler_type = resume_training_config.get('scheduler_type', scheduler_type)
-        num_training_steps = resume_training_config.get(
-            'num_training_steps',
-            updates_per_epoch * epochs,
-        )
-        num_warmup_steps = resume_training_config.get('num_warmup_steps')
+        num_training_steps = updates_per_epoch * epochs
+        num_warmup_steps = 0 if resume_from is not None else None
         scheduler = WarmupLRScheduler(
             optimizer,
             scheduler_type=scheduler_type,
@@ -243,6 +259,8 @@ def train_encoder_decoder(
             num_warmup_steps=num_warmup_steps,
             warmup_ratio=warmup_ratio,
         )
+        if resume_from is not None:
+            print("恢复训练将从配置的 lr 开始新的衰减周期")
 
     # 保存最佳模型
     best_val_loss = float('inf')
@@ -254,12 +272,15 @@ def train_encoder_decoder(
             resume_from,
             model,
             optimizer,
-            scheduler=scheduler,
+            scheduler=None,
             scaler=scaler,
             device=device,
         )
         start_epoch = training_info['start_epoch']
         best_val_loss = training_info['best_val_loss']
+        if scheduler is not None:
+            for parameter_group in optimizer.param_groups:
+                parameter_group['lr'] = lr
 
     # TensorBoard 日志
     amp_suffix = "_amp" if use_amp else ""
@@ -274,6 +295,7 @@ def train_encoder_decoder(
         for epoch in range(start_epoch, start_epoch + epochs):
             model.train()
             total_loss = 0
+            total_tokens = 0
             optimizer.zero_grad()  # 在 epoch 开始时清零梯度
 
             for batch_idx, (src, tgt) in enumerate(tqdm(train_loader, desc=f"Epoch {epoch} - Train")):
@@ -316,8 +338,10 @@ def train_encoder_decoder(
                     loss = loss / accumulation_divisor
                     loss.backward()
 
-                # 累积真实 loss（不缩放）用于日志记录
-                total_loss += loss.item() * accumulation_divisor
+                # 按有效 token 聚合，避免不同 padding 比例的 batch 被等权平均。
+                num_tokens = (tgt[:, 1:] != pad_token_id).sum().item()
+                total_loss += loss.item() * accumulation_divisor * num_tokens
+                total_tokens += num_tokens
 
                 # 每 gradient_accumulation_steps 步更新一次参数
                 if should_update:
@@ -344,7 +368,7 @@ def train_encoder_decoder(
                     if scheduler is not None:
                         scheduler.step()
 
-            avg_loss = total_loss / len(train_loader)
+            avg_loss = total_loss / total_tokens
             current_lr = optimizer.param_groups[0]['lr']
             print(f"Epoch {epoch} Train Loss: {avg_loss:.4f}, LR: {current_lr:.2e}")
 
@@ -354,6 +378,7 @@ def train_encoder_decoder(
             # 验证
             model.eval()
             val_loss = 0
+            val_tokens = 0
             with torch.no_grad():
                 for src, tgt in tqdm(val_loader, desc=f"Epoch {epoch} - Val"):
                     src, tgt = src.to(device), tgt.to(device)
@@ -375,8 +400,10 @@ def train_encoder_decoder(
                         logits, _ = model(src, tgt_input, src_mask=src_mask, tgt_mask=tgt_mask, cross_mask=cross_mask)
                         loss = criterion(logits.reshape(-1, tgt_vocab_size), tgt[:, 1:].reshape(-1))
 
-                    val_loss += loss.item()
-            avg_val_loss = val_loss / len(val_loader)
+                    num_tokens = (tgt[:, 1:] != pad_token_id).sum().item()
+                    val_loss += loss.item() * num_tokens
+                    val_tokens += num_tokens
+            avg_val_loss = val_loss / val_tokens
             print(f"Epoch {epoch} Val Loss: {avg_val_loss:.4f}")
 
             # Demo 翻译测试
@@ -398,6 +425,7 @@ def train_encoder_decoder(
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'val_loss': avg_val_loss,
+                    'rng_state': capture_rng_state(),
                     'config': {
                         'src_vocab_size': src_vocab_size,
                         'tgt_vocab_size': tgt_vocab_size,
@@ -434,6 +462,7 @@ def train_encoder_decoder(
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'val_loss': best_val_loss,
+            'rng_state': capture_rng_state(),
             'config': {'src_vocab_size': src_vocab_size, 'tgt_vocab_size': tgt_vocab_size,
                       'd_model': d_model, 'num_layers': num_layers, 'num_heads': num_heads,
                       'd_ff': d_ff, 'max_len': max_len, 'dropout': dropout},

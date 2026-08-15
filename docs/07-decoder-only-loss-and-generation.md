@@ -372,9 +372,9 @@ with torch.no_grad():
             break
 ```
 
-`scripts/generate.py::greedy_generate` 当前展示了相同核心逻辑，但未包裹 `torch.no_grad()`；
-更完整的 `utils/generation_utils.py` 路径已在每次 forward 使用 no-grad。教学或生产推理应避免
-无意义地构建反向图。
+`scripts/generate.py::greedy_generate` 与 `utils/generation_utils.py` 都会在循环前检查
+`prompt_tokens + generated_tokens`，使用 inference mode，并在结束后恢复模型原先的
+train/eval 状态。这里的 `max_len` 兼容旧 API，语义是“新生成 token 数”，不是总长度。
 
 ## 随机性与可复现
 

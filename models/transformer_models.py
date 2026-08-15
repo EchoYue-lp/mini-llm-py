@@ -3,15 +3,17 @@ import torch.nn as nn
 import math
 from .layers import PositionalEncoding
 from .decoder_encoder_layer import DecoderLayer, EncoderLayer
+from utils.mask_utils import create_causal_mask
 
 class DecoderOnlyModel(nn.Module):
     """
     Decoder-only Transformer with Pre-LN blocks and final normalization.
 
-    Token ids use shape [B,T]; logits use [B,T,V]. Pre-LN leaves the residual
-    stream after the final block unnormalized, so a final LayerNorm is applied
-    before the vocabulary projection. It improves the gradient path but does
-    not remove the need for an appropriate optimizer schedule.
+    Token ids use shape [B,T]; logits use [B,T,V]. Self-attention is always
+    causal; a caller mask can further hide padding or other positions. Pre-LN
+    leaves the residual stream after the final block unnormalized, so a final
+    LayerNorm is applied before the vocabulary projection. It improves the
+    gradient path but does not remove the need for an optimizer schedule.
     """
     def __init__(self, vocab_size, d_model=256, num_layers=4, num_heads=4, d_ff=1024, max_len=512, dropout=0.1):
         super().__init__()
@@ -44,6 +46,8 @@ class DecoderOnlyModel(nn.Module):
             raise TypeError("decoder input ids must use torch.long")
         if x.size(1) > self.max_len:
             raise ValueError("decoder sequence length exceeds max_len")
+        causal_mask = create_causal_mask(x.size(1), device=x.device)
+        mask = causal_mask if mask is None else causal_mask & mask
         # 应用 embedding 缩放以平衡位置编码的影响
         x = self.embed(x) * self.embed_scale
         x = self.pos_enc(x)
@@ -61,7 +65,8 @@ class EncoderDecoderModel(nn.Module):
     Encoder-decoder Transformer with Pre-LN blocks and final norms.
 
     Source ids are [B,Ts], target ids are [B,Tt], encoder memory is [B,Ts,D],
-    and output logits are [B,Tt,Vt]. Source and target lengths are independent;
+    and output logits are [B,Tt,Vt]. Target self-attention is always causal.
+    Source and target lengths are independent;
     cross-attention scores therefore use [B,H,Tt,Ts].
     """
     def __init__(self, src_vocab_size, tgt_vocab_size, d_model=256, num_layers=4, num_heads=4, d_ff=1024, max_len=512, dropout=0.1):
@@ -113,6 +118,8 @@ class EncoderDecoderModel(nn.Module):
             raise ValueError("source and target batch sizes must match")
         if src.size(1) > self.max_len or tgt.size(1) > self.max_len:
             raise ValueError("source or target sequence length exceeds max_len")
+        causal_mask = create_causal_mask(tgt.size(1), device=tgt.device)
+        tgt_mask = causal_mask if tgt_mask is None else causal_mask & tgt_mask
         # Encoder - 应用 embedding 缩放
         src_emb = self.src_embed(src) * self.embed_scale
         src_emb = self.src_pos_enc(src_emb)

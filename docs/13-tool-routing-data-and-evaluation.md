@@ -89,12 +89,13 @@ no_tool          -> tool=null、arguments={}、missing_arguments 为空
 ## 数据拆分
 
 ```text
-train: 38
-valid: 5
-test:  5
+train: 34
+valid: 8
+test:  8
 ```
 
-当前只有 48 条教学数据，用于验证流程，不代表生产能力。
+当前只有 50 条教学数据。拆分按 intent 分层，validation/test 各覆盖全部 8 种 intent；它仍只
+用于验证流程，不代表生产能力。
 
 ## 校验
 
@@ -341,13 +342,13 @@ Schema 应先定义，再生成数据。
 
 ## 小测试集百分比的陷阱
 
-测试集只有 5 条时：
+测试集只有 8 条时：
 
 ```text
-1 条样本 = 20%
+1 条样本 = 12.5%
 ```
 
-从 60% 到 80% 只代表多答对一条，统计波动很大。报告百分比时必须同时报告样本数和逐条
+从 62.5% 到 75% 只代表多答对一条，统计波动很大。报告百分比时必须同时报告样本数和逐条
 结果。
 
 ## 混淆分析
@@ -418,8 +419,10 @@ action == no_tool
 | Schema valid | 字段、类型和跨字段约束合法 |
 | Exact match | 与期望决策完全一致 |
 
-当前 `json_valid` 实际更接近 extractable JSON。阅读报告时应知道解析器有多宽松；更换解析
-规则会改变指标，即使模型输出完全不变。
+评测现在分别报告 `raw_json_valid`、`extractable_json`、`schema_valid` 和 `exact_match`。
+字段准确率只在 schema 合法的输出上累计，但分母始终是完整测试集，因此不会用宽松解析掩盖
+协议失败。报告同时保存原始输出、测试集 SHA-256、模型 revision、Python/MLX-LM 版本和生成
+参数；更换解析规则仍会改变指标，因此比较实验时也必须保留解析代码版本。
 
 首 `{` 到末 `}` 策略还可能错误处理多个 JSON 对象、解释文本中的花括号或尾随内容。生产
 环境优先使用 constrained decoding，并对完整原始响应做严格验证。
@@ -467,7 +470,7 @@ Micro average 按样本汇总，常见意图占比高时主导结果；Macro ave
 
 ## 小样本不确定性
 
-5 条测试中 4 条正确得到 80%，但真实准确率的不确定区间很宽。对二项比例可报告 Wilson
+8 条测试中 7 条正确得到 87.5%，但真实准确率的不确定区间仍很宽。对二项比例可报告 Wilson
 interval。近似计算：
 
 ```python
@@ -565,7 +568,7 @@ exact = schema_valid and normalized(actual) == normalized(expected)
 
 1. 为每个工具写 5 条完整参数和 5 条缺参样本。
 2. 写 10 条包含工具关键词但应 `no_tool` 的 hard negatives。
-3. 手算一个 5 条测试集的所有字段指标。
+3. 手算一个 8 条测试集的所有字段指标。
 4. 增加 Action confusion matrix。
 5. 故意创建一条跨 split 重复数据，确认 validator 拒绝。
 
@@ -574,5 +577,5 @@ exact = schema_valid and normalized(actual) == normalized(expected)
 1. Intent 与 Action 为什么不能合并成一个字段？
 2. JSON valid 为什么不等于业务正确？
 3. 为什么 Exact match 是工具调用的重要主指标？
-4. 5 条测试集的 80% 实际是多少条？
+4. 8 条测试集的 87.5% 实际是多少条？
 5. 哪类误调用具有最高业务风险？

@@ -3,20 +3,13 @@
 
 import json
 import random
+from collections import defaultdict
 from pathlib import Path
 
 from utils.project_paths import TOOL_ROUTER_DATA_DIR
+from utils.tool_router_schema import SYSTEM_PROMPT
 
-SYSTEM = (
-    "你是工具路由模型。只输出一个JSON对象，不要解释。"
-    "字段为action、intent、tool、arguments、missing_arguments。"
-    "action只能是call_tool、ask_clarification或no_tool。"
-    "工具签名：weather_query(city,date)、logistics_query(order_id)、"
-    "order_cancel(order_id)、refund_query(refund_id)。"
-    "缺少参数时tool必须为null，arguments必须为空对象，"
-    "missing_arguments只能使用city、date、order_id、refund_id、"
-    "single_intent、confirmed_intent或intent。"
-)
+SYSTEM = SYSTEM_PROMPT
 
 
 def result(
@@ -84,6 +77,8 @@ EXAMPLES = [
     ("取消订单有什么规则", result("no_tool", "knowledge_question")),
     ("查明天成都天气，顺便看看订单A1024", result("ask_clarification", "multiple_intents", missing=["single_intent"])),
     ("取消订单B7788还是先查下物流吧", result("ask_clarification", "multiple_intents", missing=["confirmed_intent"])),
+    ("查北京天气，再取消订单A1024", result("ask_clarification", "multiple_intents", missing=["single_intent"])),
+    ("先查退款R301还是查物流A1024", result("ask_clarification", "multiple_intents", missing=["confirmed_intent"])),
     ("帮我处理一下", result("ask_clarification", "unknown", missing=["intent"])),
     ("这个怎么弄", result("ask_clarification", "unknown", missing=["intent"])),
     ("给我查一下", result("ask_clarification", "unknown", missing=["intent"])),
@@ -108,14 +103,40 @@ def write_jsonl(path: Path, rows: list[tuple[str, str]]) -> None:
             file.write(json.dumps(to_record(row), ensure_ascii=False) + "\n")
 
 
+def split_examples(
+    rows: list[tuple[str, str]],
+    seed: int = 42,
+) -> tuple[list[tuple[str, str]], list[tuple[str, str]], list[tuple[str, str]]]:
+    """Create deterministic splits with every intent in validation and test."""
+    grouped: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    for row in rows:
+        intent = json.loads(row[1])["intent"]
+        grouped[intent].append(row)
+
+    rng = random.Random(seed)
+    train = []
+    valid = []
+    test = []
+    for intent in sorted(grouped):
+        intent_rows = grouped[intent]
+        if len(intent_rows) < 3:
+            raise ValueError(f"intent {intent!r} needs at least three examples")
+        rng.shuffle(intent_rows)
+        test.append(intent_rows.pop())
+        valid.append(intent_rows.pop())
+        train.extend(intent_rows)
+    for split in (train, valid, test):
+        rng.shuffle(split)
+    return train, valid, test
+
+
 def main() -> None:
-    rows = EXAMPLES.copy()
-    random.Random(42).shuffle(rows)
+    train, valid, test = split_examples(EXAMPLES.copy())
     TOOL_ROUTER_DATA_DIR.mkdir(parents=True, exist_ok=True)
-    write_jsonl(TOOL_ROUTER_DATA_DIR / "train.jsonl", rows[:38])
-    write_jsonl(TOOL_ROUTER_DATA_DIR / "valid.jsonl", rows[38:43])
-    write_jsonl(TOOL_ROUTER_DATA_DIR / "test.jsonl", rows[43:])
-    print(f"Wrote {len(rows[:38])} train, {len(rows[38:43])} valid, {len(rows[43:])} test examples")
+    write_jsonl(TOOL_ROUTER_DATA_DIR / "train.jsonl", train)
+    write_jsonl(TOOL_ROUTER_DATA_DIR / "valid.jsonl", valid)
+    write_jsonl(TOOL_ROUTER_DATA_DIR / "test.jsonl", test)
+    print(f"Wrote {len(train)} train, {len(valid)} valid, {len(test)} test examples")
 
 
 if __name__ == "__main__":

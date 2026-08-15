@@ -3,7 +3,7 @@
 Exercises after running this module:
 1. Change the vectors in ``run_demo`` and calculate the dot product by hand.
 2. Increase one logit by 10 and observe the softmax concentration.
-3. Replace ``x**2`` in the finite-difference example with ``x**3``.
+3. Compare the finite-difference results for ``x**2`` and ``x**3``.
 """
 
 from __future__ import annotations
@@ -37,6 +37,7 @@ def matrix_multiply(
         raise ValueError("inner matrix dimensions must match")
 
     right_columns = list(zip(*right))
+
     return [[dot(row, column) for column in right_columns] for row in left]
 
 
@@ -80,6 +81,7 @@ def scaled_dot_product(query: Sequence[float], key: Sequence[float]) -> float:
     return dot(query, key) / math.sqrt(len(query))
 
 
+# 中心差分法
 def finite_difference(
     function: Callable[[float], float],
     value: float,
@@ -90,7 +92,7 @@ def finite_difference(
         raise ValueError("epsilon must be positive")
     return (function(value + epsilon) - function(value - epsilon)) / (2 * epsilon)
 
-
+# math.isclose uses relative/absolute tolerances for floating-point comparisons.
 def run_demo() -> None:
     vector_a = [1.0, 2.0, 3.0]
     vector_b = [4.0, 5.0, 6.0]
@@ -108,9 +110,9 @@ def run_demo() -> None:
     assert probabilities[0] > probabilities[1] > probabilities[2]
 
     loss = cross_entropy_from_logits([2.0, 1.0, 0.0], target=0)
-    derivative = finite_difference(lambda x: x**2, value=3.0)
+    derivative = finite_difference(lambda x: x**3, value=3.0)
     assert math.isclose(loss, -math.log(stable_softmax([2.0, 1.0, 0.0])[0]))
-    assert math.isclose(derivative, 6.0, rel_tol=1e-5)
+    assert math.isclose(derivative, 27.0, rel_tol=1e-5)
 
     variance = population_variance([1.0, 2.0, 3.0])
     score = scaled_dot_product(vector_a, vector_b)
@@ -121,7 +123,7 @@ def run_demo() -> None:
     print("cross entropy for target 0:", round(loss, 4))
     print("population variance:", round(variance, 4))
     print("scaled dot product:", round(score, 4))
-    print("finite-difference derivative of x^2 at x=3:", round(derivative, 4))
+    print("finite-difference derivative of x^3 at x=3:", round(derivative, 4))
 
 
 if __name__ == "__main__":

@@ -5,11 +5,14 @@
 import sys
 
 import torch
-from transformers import GPT2TokenizerFast
 from models.transformer_models import EncoderDecoderModel
+from utils.sentencepiece_tokenizer import SentencePieceTokenizer
 from utils.translation_utils import greedy_translate, beam_search_translate
 
-def diagnose_model(checkpoint_path):
+def diagnose_model(
+    checkpoint_path,
+    tokenizer_path="tokenization/sentencepiece_enzh.model",
+):
     """诊断模型问题"""
     print(f"\n{'='*60}")
     print(f"诊断模型: {checkpoint_path}")
@@ -48,7 +51,7 @@ def diagnose_model(checkpoint_path):
     print(f"  总参数量: {sum(p.numel() for p in model.parameters()):,}")
 
     # 加载 tokenizer
-    tokenizer = GPT2TokenizerFast.from_pretrained("tokenization/gpt2")
+    tokenizer = SentencePieceTokenizer.from_pretrained(tokenizer_path)
 
     # 测试翻译
     test_sentences = [
@@ -89,7 +92,7 @@ def diagnose_model(checkpoint_path):
     src = "Hello world"
     src_ids = tokenizer.encode(src, add_special_tokens=False)
     src_tensor = torch.tensor(src_ids, dtype=torch.long).unsqueeze(0).to(device)
-    bos_id = tokenizer.eos_token_id  # GPT2 用 EOS 作为 BOS
+    bos_id = tokenizer.bos_token_id
     tgt_tensor = torch.tensor([bos_id], dtype=torch.long).unsqueeze(0).to(device)
 
     with torch.no_grad():

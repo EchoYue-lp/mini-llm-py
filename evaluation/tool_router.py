@@ -2,14 +2,25 @@
 """Evaluate base or adapted models on the same deterministic JSONL test set."""
 
 import argparse
+import hashlib
 import json
+import platform
+from importlib.metadata import version
 from typing import Any
 
 from mlx_lm import generate, load
 from mlx_lm.sample_utils import make_sampler
 
+from evaluation.tool_router_metrics import (
+    extract_json,
+    is_schema_valid,
+    normalized,
+    parse_raw_json,
+)
+
 from utils.project_paths import (
     MLX_MODEL_DIR,
+    MLX_MODEL_MANIFEST,
     PROJECT_ROOT,
     TOOL_ROUTER_DATA_DIR,
     resolve_project_path,
@@ -27,29 +38,17 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def extract_json(text: str) -> dict[str, Any] | None:
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end < start:
-        return None
-    try:
-        value = json.loads(text[start : end + 1])
-    except json.JSONDecodeError:
-        return None
-    return value if isinstance(value, dict) else None
-
-
 def load_rows() -> list[dict[str, Any]]:
     with TEST_PATH.open(encoding="utf-8") as file:
         return [json.loads(line) for line in file if line.strip()]
 
 
-def normalized(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {key: normalized(value[key]) for key in sorted(value)}
-    if isinstance(value, list):
-        return sorted(normalized(item) for item in value)
-    return value
+def sha256_file(path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def main() -> None:
@@ -59,7 +58,13 @@ def main() -> None:
     sampler = make_sampler(temp=0.0)
     rows = load_rows()
     fields = ["action", "intent", "tool", "arguments", "missing_arguments"]
-    totals = {"json_valid": 0, "exact_match": 0, **{field: 0 for field in fields}}
+    totals = {
+        "raw_json_valid": 0,
+        "extractable_json": 0,
+        "schema_valid": 0,
+        "exact_match": 0,
+        **{field: 0 for field in fields},
+    }
     predictions = []
 
     for row in rows:
@@ -79,9 +84,14 @@ def main() -> None:
             sampler=sampler,
             verbose=False,
         ).strip()
-        actual = extract_json(raw)
+        raw_actual = parse_raw_json(raw)
+        if raw_actual is not None:
+            totals["raw_json_valid"] += 1
+        actual = raw_actual if raw_actual is not None else extract_json(raw)
         if actual is not None:
-            totals["json_valid"] += 1
+            totals["extractable_json"] += 1
+        if is_schema_valid(actual):
+            totals["schema_valid"] += 1
             for field in fields:
                 if normalized(actual.get(field)) == normalized(expected.get(field)):
                     totals[field] += 1
@@ -103,6 +113,21 @@ def main() -> None:
         "model": str(MLX_MODEL_DIR.relative_to(PROJECT_ROOT)),
         "adapter": args.adapter,
         "samples": count,
+        "provenance": {
+            "model_manifest": (
+                json.loads(MLX_MODEL_MANIFEST.read_text(encoding="utf-8"))
+                if MLX_MODEL_MANIFEST.exists()
+                else None
+            ),
+            "test_sha256": sha256_file(TEST_PATH),
+            "python": platform.python_version(),
+            "mlx_lm": version("mlx-lm"),
+            "generation": {
+                "temperature": 0.0,
+                "max_tokens": args.max_tokens,
+                "enable_thinking": False,
+            },
+        },
         "metrics": metrics,
         "predictions": predictions,
     }

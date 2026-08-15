@@ -5,17 +5,28 @@ from utils.checkpoint_utils import load_model_from_checkpoint
 from utils.tokenizer_utils import load_gpt2_tokenizer
 
 def greedy_generate(model, input_ids, tokenizer, max_len=50, device="cpu"):
+    if input_ids is None or len(input_ids) == 0:
+        raise ValueError("input_ids must contain at least one token")
+    if max_len < 0:
+        raise ValueError("max_len (generated token count) must be non-negative")
+    if len(input_ids) + max_len > model.max_len:
+        raise ValueError("prompt plus generated tokens exceeds model max_len")
+
+    tokens = torch.tensor(input_ids, dtype=torch.long).unsqueeze(0).to(device)
+    was_training = model.training
     model.eval()
-    input_ids = torch.tensor(input_ids, dtype=torch.long).unsqueeze(0).to(device)  # (1, seq_len)
-    for _ in range(max_len):
-        # 为当前序列创建 causal mask
-        mask = create_causal_mask(input_ids.size(1), device=device)
-        logits, _ = model(input_ids, mask=mask)
-        next_token = logits[:, -1, :].argmax(-1, keepdim=True)
-        input_ids = torch.cat([input_ids, next_token], dim=1)
-        if next_token.item() == tokenizer.eos_token_id:
-            break
-    return input_ids.squeeze(0).tolist()
+    try:
+        with torch.inference_mode():
+            for _ in range(max_len):
+                mask = create_causal_mask(tokens.size(1), device=device)
+                logits, _ = model(tokens, mask=mask)
+                next_token = logits[:, -1, :].argmax(-1, keepdim=True)
+                tokens = torch.cat([tokens, next_token], dim=1)
+                if next_token.item() == tokenizer.eos_token_id:
+                    break
+    finally:
+        model.train(was_training)
+    return tokens.squeeze(0).tolist()
 
 def generate_text(prompt, model, tokenizer, device="cpu", max_len=50):
     input_ids = tokenizer.encode(prompt, add_special_tokens=False)

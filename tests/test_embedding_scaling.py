@@ -7,7 +7,19 @@ import sys
 import torch
 from models.transformer_models import EncoderDecoderModel
 from utils.translation_utils import beam_search_translate
-from utils.tokenizer_utils import load_gpt2_tokenizer
+
+
+class FakeTokenizer:
+    pad_token_id = 0
+    bos_token_id = 1
+    eos_token_id = 2
+
+    def __len__(self):
+        return 1000
+
+    def decode(self, ids, skip_special_tokens=True):
+        del skip_special_tokens
+        return " ".join(str(item) for item in ids)
 
 
 def test_embedding_scaling_consistency():
@@ -27,7 +39,7 @@ def test_embedding_scaling_consistency():
     model.eval()
 
     # 创建 tokenizer
-    tokenizer = load_gpt2_tokenizer("tokenization/gpt2")
+    tokenizer = FakeTokenizer()
 
     # 测试输入
     src = torch.randint(0, 1000, (1, 10))
@@ -43,7 +55,7 @@ def test_embedding_scaling_consistency():
 
     print("\n2. 手动运行 encoder + decoder (翻译时的方式 - 修复后):")
     with torch.no_grad():
-        from utils.mask_utils import create_padding_mask
+        from utils.mask_utils import create_causal_mask, create_padding_mask
 
         pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
         src_mask = create_padding_mask(src, pad_token_id=pad_token_id)
@@ -59,8 +71,9 @@ def test_embedding_scaling_consistency():
         # ✅ 修复后：应用 embedding scaling
         tgt_emb = model.tgt_embed(tgt) * model.embed_scale
         tgt_emb = model.tgt_pos_enc(tgt_emb)
+        tgt_mask = create_causal_mask(tgt.size(1), device=tgt.device)
         for layer in model.decoder_layers:
-            tgt_emb, _, _ = layer(tgt_emb, enc_out=memory)
+            tgt_emb, _, _ = layer(tgt_emb, enc_out=memory, self_mask=tgt_mask)
         tgt_emb = model.decoder_norm(tgt_emb)
         logits_infer = model.out_proj(tgt_emb)
 
@@ -90,7 +103,7 @@ def test_beam_search_with_scaling():
     print("=" * 60)
 
     # 创建模型
-    tokenizer = load_gpt2_tokenizer("tokenization/gpt2")
+    tokenizer = FakeTokenizer()
     vocab_size = len(tokenizer)
     model = EncoderDecoderModel(
         src_vocab_size=vocab_size,

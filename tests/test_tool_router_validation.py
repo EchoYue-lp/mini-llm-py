@@ -95,3 +95,16 @@ def test_field_types_and_values_are_validated(overrides, message):
 def test_answer_must_be_an_object():
     with pytest.raises(ValueError, match="must be a JSON object"):
         validate_answer([], "test:object")
+
+
+def test_unknown_intent_is_rejected():
+    with pytest.raises(ValueError, match="unknown intent"):
+        validate_answer(answer(intent="made_up"), "test:intent")
+
+
+def test_intent_must_match_called_tool():
+    with pytest.raises(ValueError, match="requires tool"):
+        validate_answer(
+            answer(intent="query_logistics"),
+            "test:intent-tool",
+        )

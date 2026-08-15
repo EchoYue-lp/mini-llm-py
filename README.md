@@ -131,10 +131,21 @@ python -m labs.lab10_mha_mqa_gqa
 python -m labs.lab11_moe_variants
 ```
 
+一次运行全部自包含实验：
+
+```bash
+python -m labs
+# 或同时运行 foundations 与 labs
+make smoke-core
+```
+
 每个实验的核心问题、观察量和修改建议见 [Labs 使用指南](labs/README.md)。
 
 完整学习顺序见
 [00 学习路线、代码地图与工程数学基础](docs/00-learning-path-and-code-map.md)。
+
+到第 11 章和 `lab09` 为止是 CPU/CUDA/MPS 均可完成的跨平台主线；第 12-14 章是 Apple
+Silicon 上的 MLX 专项实践，不是完成 Transformer 与 LoRA 基础学习的前置条件。
 
 ## PyTorch 英中翻译
 
@@ -220,6 +231,9 @@ python -m scripts.resume_training \
   --epochs 10
 ```
 
+这里的 `--epochs 10` 表示新增一个 10-epoch 训练阶段：恢复模型、optimizer 和 RNG 状态，
+并从命令配置的学习率开始新的衰减周期，不会继续越过旧 scheduler 的终点。
+
 启动 TensorBoard：
 
 ```bash
@@ -228,7 +242,7 @@ tensorboard --logdir=runs --port=6006
 
 ## MLX LoRA 工具路由
 
-该实验使用 Qwen3-0.6B 和 48 条教学数据，演示模型下载、基座推理、数据构造、
+该实验使用 Qwen3-0.6B 和 50 条教学数据，演示模型下载、基座推理、数据构造、
 Schema 校验、LoRA 短训练、LoRA 长训练、adapter 推理和固定测试集评测。
 
 这套数据用于验证工程流程，不代表生产效果。
@@ -238,6 +252,10 @@ Schema 校验、LoRA 短训练、LoRA 长训练、adapter 推理和固定测试�
 ```bash
 python -m scripts.download_mlx_model
 ```
+
+首次下载会解析并记录当前 Hugging Face commit；之后默认复用该不可变 revision。要显式选择
+版本可运行 `python -m scripts.download_mlx_model --revision <commit-or-tag>`，记录写入模型目录
+的 `mini_llm_download_manifest.json`。
 
 模型保存到：
 
@@ -353,6 +371,9 @@ LoRA 原理、训练与评测分别见 11-13。
 ## 开发与测试
 
 ```bash
+make test-core       # 不需要 Transformers / MLX
+make test-pytorch    # 完整 PyTorch 环境
+make test-mlx        # Apple Silicon MLX 环境
 make test
 make check
 ```
@@ -390,6 +411,7 @@ make check
 - [12 LoRA 训练、Checkpoint 与过拟合](docs/12-lora-training-checkpoints-and-overfitting.md)
 - [13 工具路由数据与评测](docs/13-tool-routing-data-and-evaluation.md)
 - [14 MLX LoRA 工具路由完整流程](docs/14-mlx-lora-tool-router-workflow.md)
+- [原始论文与官方资料](docs/primary-references.md)
 
 ## License
 

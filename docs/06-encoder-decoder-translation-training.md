@@ -237,8 +237,11 @@ n-gram 重合。二者相关但不等价：
 - 模型结构配置。
 - Tokenizer 词表信息。
 - CUDA AMP GradScaler 状态。
+- Python、PyTorch 以及 CUDA 的 RNG 状态。
 
-只保存 `state_dict` 可以推理，但无法精确继续训练。
+只保存 `state_dict` 可以推理，但无法精确继续训练。本项目的完整 checkpoint 会恢复 RNG；
+若使用 `resume_training --epochs N` 开启一个额外训练阶段，则保留 optimizer moments，但从命令
+配置的 `lr` 开始一条新的、长度为 N 个 epoch 的衰减曲线，避免越过旧 scheduler 的终点。
 
 ## 数据问题比模型问题更常见
 
@@ -323,6 +326,9 @@ Exposure bias 描述训练使用真实历史、推理使用模型历史的分布
 content = content[: max_len - 2]
 target = [bos_id] + content + [eos_id]
 ```
+
+`collate_fn_with_padding` 和 SentencePiece 平行语料预处理均按此规则保留目标 EOS；预处理还会
+按原始行号成对读取双语文本，任意一侧缺行或单侧空行都会立即报错。
 
 本项目预处理、collate 和训练脚本之间必须约定由谁添加特殊 token。若 tokenizer 已自动加
 BOS/EOS，数据代码再加一次，会出现重复边界。

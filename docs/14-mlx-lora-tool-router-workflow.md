@@ -1,6 +1,6 @@
 # 14 MLX LoRA 工具路由完整流程
 
-本实验使用 Qwen3-0.6B、Apple MLX 和 48 条教学数据，覆盖从模型下载到三模型评测的
+本实验使用 Qwen3-0.6B、Apple MLX 和 50 条教学数据，覆盖从模型下载到三模型评测的
 完整后训练链路。
 
 ## 学习目标
@@ -68,7 +68,8 @@ data/tool_router/
 python -m scripts.download_mlx_model
 ```
 
-模型保存到 `artifacts/models/Qwen3-0.6B/`。
+模型保存到 `artifacts/models/Qwen3-0.6B/`。首次运行会把解析到的 Hugging Face commit 写入
+`mini_llm_download_manifest.json`，后续下载默认复用该 revision；也可用 `--revision` 显式指定。
 
 ## 2. 基座推理
 
@@ -160,15 +161,13 @@ artifacts/results/tool-router/comparison.md
 
 ## 教学实测
 
-| 模型 | JSON 合法 | 完全正确 | Action | Intent | Tool | Arguments | Missing |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Base | 100% | 0% | 40% | 0% | 60% | 80% | 40% |
-| Short LoRA | 80% | 20% | 40% | 60% | 40% | 60% | 60% |
-| Long LoRA | 100% | 80% | 80% | 100% | 80% | 80% | 80% |
+以本次运行生成的 `comparison.md` 为准。报告分别展示原始 JSON 合法率、宽松提取率、
+Schema 合法率、完全正确率和字段准确率，并根据实际数值生成结论。本仓库不硬编码某次模型
+快照的百分比；测试集只有 8 条，任何结果都只能证明评测流程工作。
 
-测试集只有 5 条，这些百分比只能证明流程工作。
+## 历史资源记录
 
-## 资源记录
+以下数值来自文档顶部所列 M1 Pro 环境，仅用于估算资源，不是可复现的质量结论：
 
 | 实验 | 可训练参数 | 峰值统一内存 | 最佳验证 loss |
 | --- | ---: | ---: | ---: |

@@ -149,7 +149,12 @@ def test_decoder_training_resumes_with_checkpoint_architecture(
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'config': config,
-            'training_config': {'use_scheduler': False},
+            'training_config': {
+                'use_scheduler': True,
+                'scheduler_type': 'cosine',
+                'num_training_steps': 99,
+                'num_warmup_steps': 9,
+            },
         },
         checkpoint_path,
     )
@@ -170,6 +175,8 @@ def test_decoder_training_resumes_with_checkpoint_architecture(
     )
     assert resumed['epoch'] == 2
     assert resumed['config'] == config
+    assert resumed['training_config']['num_training_steps'] == 1
+    assert resumed['training_config']['num_warmup_steps'] == 0
 
 
 def test_resume_helpers_call_real_training_entrypoints(monkeypatch):

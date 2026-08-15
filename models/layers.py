@@ -141,8 +141,9 @@ class PositionalEncoding(nn.Module):
         if seq_len > self.pe.size(1):
             raise ValueError(f"序列长度 {seq_len} 超过位置编码的最大长度 {self.pe.size(1)}")
 
-        # 添加位置编码并应用 dropout
-        x = x + self.pe[:, :seq_len, :]
+        # 保持激活 dtype，避免半精度输入被 float32 buffer 静默提升。
+        position = self.pe[:, :seq_len, :].to(dtype=x.dtype)
+        x = x + position
         return self.dropout(x)
 
 class LayerNorm(nn.Module):

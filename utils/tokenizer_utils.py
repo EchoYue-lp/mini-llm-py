@@ -1,7 +1,5 @@
 """Tokenizer helpers shared by training, preprocessing, and generation."""
 
-from transformers import GPT2TokenizerFast
-
 
 GPT2_PAD_TOKEN = "<|pad|>"
 
@@ -13,6 +11,13 @@ def load_gpt2_tokenizer(tokenizer_dir="tokenization/gpt2"):
     masks valid text. Adding one dedicated token keeps EOS trainable and makes
     padding behavior explicit.
     """
+
+    try:
+        from transformers import GPT2TokenizerFast
+    except ImportError as error:
+        raise RuntimeError(
+            "GPT-2 tokenizer support requires `pip install -r requirements.txt`"
+        ) from error
 
     tokenizer = GPT2TokenizerFast.from_pretrained(tokenizer_dir)
     if tokenizer.pad_token_id is None:

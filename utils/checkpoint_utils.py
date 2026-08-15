@@ -3,8 +3,30 @@ Checkpoint 工具函数
 用于加载和保存模型检查点
 """
 
+import random
+
 import torch
 from typing import Dict, Any, Tuple
+
+
+def capture_rng_state() -> Dict[str, Any]:
+    """Capture RNG state needed to continue data shuffling reproducibly."""
+    state = {
+        'python': random.getstate(),
+        'torch': torch.get_rng_state(),
+    }
+    if torch.cuda.is_available():
+        state['cuda'] = torch.cuda.get_rng_state_all()
+    return state
+
+
+def restore_rng_state(state: Dict[str, Any]) -> None:
+    if 'python' in state:
+        random.setstate(state['python'])
+    if 'torch' in state:
+        torch.set_rng_state(state['torch'])
+    if 'cuda' in state and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all(state['cuda'])
 
 
 def get_checkpoint_config(
@@ -16,8 +38,8 @@ def get_checkpoint_config(
 
     Weight-only checkpoints cannot reliably reveal ``num_heads`` because head
     count does not change the projection matrix shapes. Training resume
-    therefore requires an explicitly saved config, while inference utilities
-    may still fall back to best-effort shape inference.
+    therefore requires an explicitly saved config. Inference may infer the
+    remaining dimensions, but callers must provide ``num_heads`` explicitly.
     """
     checkpoint = torch.load(
         checkpoint_path,
@@ -91,14 +113,6 @@ def infer_model_config_from_checkpoint(checkpoint_path: str, model_type: str = '
         if num_layers > 0:
             config['num_layers'] = num_layers
 
-        # 推断 num_heads
-        if 'layers.0.self_attn.q_linear.weight' in state_dict and 'd_model' in config:
-            d_model = config['d_model']
-            # MultiHeadAttention 的 q_linear 输出维度 = d_model
-            # d_k = d_model // num_heads
-            # 从第一层的参数推断
-            config['num_heads'] = 4  # 默认值，难以从权重直接推断
-
         # 推断 d_ff
         if 'layers.0.ffn.linear1.weight' in state_dict:
             config['d_ff'] = state_dict['layers.0.ffn.linear1.weight'].shape[0]
@@ -171,8 +185,11 @@ def load_model_from_checkpoint(
         checkpoint_info = {}
 
     # 优先使用保存的配置，如果没有则推断
-    if isinstance(checkpoint, dict) and 'config' in checkpoint:
-        config = checkpoint['config']
+    has_saved_config = isinstance(checkpoint, dict) and isinstance(
+        checkpoint.get('config'), dict
+    )
+    if has_saved_config:
+        config = dict(checkpoint['config'])
         print("使用 checkpoint 中保存的配置")
     else:
         print("Checkpoint 中没有保存配置，尝试从权重推断...")
@@ -180,6 +197,11 @@ def load_model_from_checkpoint(
 
     # 覆盖配置
     config.update(override_config)
+    if not has_saved_config and 'num_heads' not in config:
+        raise ValueError(
+            "Checkpoint 缺少 config，且 num_heads 无法从权重形状推断；"
+            "请显式传入 num_heads，或使用包含 config 的完整 checkpoint。"
+        )
 
     # 打印配置
     print("检测到的模型配置:")
@@ -227,6 +249,7 @@ def save_checkpoint(
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'val_loss': val_loss,
+        'rng_state': capture_rng_state(),
     }
 
     if scheduler is not None:
@@ -289,6 +312,10 @@ def load_checkpoint_for_training(
     if scaler is not None and 'scaler_state_dict' in checkpoint:
         scaler.load_state_dict(checkpoint['scaler_state_dict'])
         print("✓ AMP Scaler 状态已加载")
+
+    if isinstance(checkpoint.get('rng_state'), dict):
+        restore_rng_state(checkpoint['rng_state'])
+        print("✓ 随机数状态已加载")
 
     # 返回训练信息
     training_info = {

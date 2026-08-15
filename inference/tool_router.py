@@ -10,17 +10,9 @@ from utils.project_paths import (
     TOOL_ROUTER_SHORT_ADAPTER_DIR,
     resolve_project_path,
 )
+from utils.tool_router_schema import SYSTEM_PROMPT
 
-SYSTEM = (
-    "你是工具路由模型。只输出一个JSON对象，不要解释。"
-    "字段为action、intent、tool、arguments、missing_arguments。"
-    "action只能是call_tool、ask_clarification或no_tool。"
-    "工具签名：weather_query(city,date)、logistics_query(order_id)、"
-    "order_cancel(order_id)、refund_query(refund_id)。"
-    "缺少参数时tool必须为null，arguments必须为空对象，"
-    "missing_arguments只能使用city、date、order_id、refund_id、"
-    "single_intent、confirmed_intent或intent。"
-)
+SYSTEM = SYSTEM_PROMPT
 
 
 def parse_args() -> argparse.Namespace:

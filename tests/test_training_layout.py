@@ -1,7 +1,10 @@
+import json
+
 from evaluation import validate_tool_router_data
 from scripts import prepare_tool_router_data
 from utils.project_paths import (
     MLX_MODEL_DIR,
+    MLX_MODEL_MANIFEST,
     PROJECT_ROOT,
     TOOL_ROUTER_DATA_DIR,
     TOOL_ROUTER_RESULTS_DIR,
@@ -11,6 +14,7 @@ from utils.project_paths import (
 
 def test_training_artifacts_live_outside_source_packages():
     assert MLX_MODEL_DIR == PROJECT_ROOT / "artifacts/models/Qwen3-0.6B"
+    assert MLX_MODEL_MANIFEST == MLX_MODEL_DIR / "mini_llm_download_manifest.json"
     assert TOOL_ROUTER_DATA_DIR == PROJECT_ROOT / "data/tool_router"
     assert TOOL_ROUTER_SHORT_ADAPTER_DIR == (
         PROJECT_ROOT / "artifacts/adapters/tool-router-short"
@@ -35,6 +39,22 @@ def test_tool_router_data_generation_and_validation(tmp_path, monkeypatch):
     prepare_tool_router_data.main()
     validate_tool_router_data.main()
 
-    assert len((tmp_path / "train.jsonl").read_text().splitlines()) == 38
-    assert len((tmp_path / "valid.jsonl").read_text().splitlines()) == 5
-    assert len((tmp_path / "test.jsonl").read_text().splitlines()) == 5
+    assert len((tmp_path / "train.jsonl").read_text().splitlines()) == 34
+    assert len((tmp_path / "valid.jsonl").read_text().splitlines()) == 8
+    assert len((tmp_path / "test.jsonl").read_text().splitlines()) == 8
+
+    for split in ("valid", "test"):
+        rows = [
+            json.loads(line)
+            for line in (tmp_path / f"{split}.jsonl").read_text().splitlines()
+        ]
+        intents = {
+            json.loads(row["messages"][-1]["content"])["intent"]
+            for row in rows
+        }
+        actions = {
+            json.loads(row["messages"][-1]["content"])["action"]
+            for row in rows
+        }
+        assert len(intents) == 8
+        assert actions == {"call_tool", "ask_clarification", "no_tool"}

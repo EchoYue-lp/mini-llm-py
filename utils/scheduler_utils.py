@@ -36,6 +36,7 @@ def get_cosine_schedule_with_warmup(
 
         # Cosine decay 阶段
         progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
+        progress = min(max(progress, 0.0), 1.0)
         return max(0.0, 0.5 * (1.0 + math.cos(math.pi * num_cycles * 2.0 * progress)))
 
     return LambdaLR(optimizer, lr_lambda, last_epoch)
@@ -130,7 +131,10 @@ def get_polynomial_decay_schedule_with_warmup(
 
         # 多项式 decay 阶段
         lr_range = lr_init - lr_end
-        pct_remaining = 1 - (current_step - num_warmup_steps) / (num_training_steps - num_warmup_steps)
+        progress = (current_step - num_warmup_steps) / max(
+            1, num_training_steps - num_warmup_steps
+        )
+        pct_remaining = 1 - min(max(progress, 0.0), 1.0)
         return (lr_range * pct_remaining ** power + lr_end) / lr_init
 
     return LambdaLR(optimizer, lr_lambda, last_epoch)

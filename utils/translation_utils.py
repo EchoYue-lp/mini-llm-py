@@ -3,11 +3,39 @@
 专门为 Encoder-Decoder 模型设计的生成策略
 """
 
+from functools import wraps
+
 import torch
 import torch.nn.functional as F
 from .mask_utils import create_padding_mask, create_causal_mask
 
 
+def _inference_translation(function):
+    @wraps(function)
+    def wrapper(model, *args, **kwargs):
+        was_training = model.training
+        model.eval()
+        try:
+            with torch.inference_mode():
+                return function(model, *args, **kwargs)
+        finally:
+            model.train(was_training)
+
+    return wrapper
+
+
+def _validate_translation_request(model, src_ids, max_new_tokens):
+    if src_ids is None or len(src_ids) == 0:
+        raise ValueError("src_ids must contain at least one token")
+    if max_new_tokens < 0:
+        raise ValueError("max_len (generated token count) must be non-negative")
+    if len(src_ids) > model.max_len:
+        raise ValueError("source sequence exceeds model max_len")
+    if 1 + max_new_tokens > model.max_len:
+        raise ValueError("BOS plus generated tokens exceeds model max_len")
+
+
+@_inference_translation
 def beam_search_translate(model, src_ids, tokenizer, beam_width=5, max_len=50, device="cpu", length_penalty=0.6):
     """
     使用 Beam Search 进行翻译
@@ -17,7 +45,7 @@ def beam_search_translate(model, src_ids, tokenizer, beam_width=5, max_len=50, d
         src_ids: 源语言 token ids (list)
         tokenizer: tokenizer
         beam_width: beam 宽度
-        max_len: 最大生成长度
+        max_len: 新生成 token 数量（不包含初始 BOS）
         device: 设备
         length_penalty: 长度惩罚系数 (alpha)，越大越鼓励长句子
                        final_score = log_prob / (len ** length_penalty)
@@ -25,7 +53,11 @@ def beam_search_translate(model, src_ids, tokenizer, beam_width=5, max_len=50, d
     Returns:
         翻译后的文本 (str)
     """
-    model.eval()
+    _validate_translation_request(model, src_ids, max_len)
+    if not 0 < beam_width <= model.tgt_vocab_size:
+        raise ValueError("beam_width must be in [1, target vocab size]")
+    if length_penalty < 0:
+        raise ValueError("length_penalty must be non-negative")
 
     # 准备源序列
     src = torch.tensor(src_ids, dtype=torch.long).unsqueeze(0).to(device)  # (1, src_len)
@@ -142,6 +174,7 @@ def beam_search_translate(model, src_ids, tokenizer, beam_width=5, max_len=50, d
     return tokenizer.decode(output_ids, skip_special_tokens=True)
 
 
+@_inference_translation
 def greedy_translate(model, src_ids, tokenizer, max_len=50, device="cpu"):
     """
     使用 Greedy Decoding 进行翻译
@@ -150,13 +183,13 @@ def greedy_translate(model, src_ids, tokenizer, max_len=50, device="cpu"):
         model: EncoderDecoderModel 实例
         src_ids: 源语言 token ids (list)
         tokenizer: tokenizer
-        max_len: 最大生成长度
+        max_len: 新生成 token 数量（不包含初始 BOS）
         device: 设备
 
     Returns:
         翻译后的文本 (str)
     """
-    model.eval()
+    _validate_translation_request(model, src_ids, max_len)
 
     # 获取起始 token
     # GPT2 tokenizer 没有 BOS，使用 EOS 作为 BOS（这是常见做法）
@@ -193,6 +226,7 @@ def greedy_translate(model, src_ids, tokenizer, max_len=50, device="cpu"):
     return tokenizer.decode(output_ids, skip_special_tokens=True)
 
 
+@_inference_translation
 def top_k_translate(model, src_ids, tokenizer, k=10, max_len=50, device="cpu", temperature=1.0):
     """
     使用 Top-K 采样进行翻译
@@ -202,14 +236,18 @@ def top_k_translate(model, src_ids, tokenizer, k=10, max_len=50, device="cpu", t
         src_ids: 源语言 token ids (list)
         tokenizer: tokenizer
         k: top-k 参数
-        max_len: 最大生成长度
+        max_len: 新生成 token 数量（不包含初始 BOS）
         device: 设备
         temperature: 温度参数，越大越随机
 
     Returns:
         翻译后的文本 (str)
     """
-    model.eval()
+    _validate_translation_request(model, src_ids, max_len)
+    if not 0 < k <= model.tgt_vocab_size:
+        raise ValueError("k must be in [1, target vocab size]")
+    if temperature <= 0:
+        raise ValueError("temperature must be positive")
 
     # 获取起始 token
     # GPT2 tokenizer 没有 BOS，使用 EOS 作为 BOS（这是常见做法）
@@ -254,6 +292,7 @@ def top_k_translate(model, src_ids, tokenizer, k=10, max_len=50, device="cpu", t
     return tokenizer.decode(output_ids, skip_special_tokens=True)
 
 
+@_inference_translation
 def top_p_translate(model, src_ids, tokenizer, p=0.9, max_len=50, device="cpu", temperature=1.0):
     """
     使用 Top-P (Nucleus) 采样进行翻译
@@ -263,14 +302,18 @@ def top_p_translate(model, src_ids, tokenizer, p=0.9, max_len=50, device="cpu", 
         src_ids: 源语言 token ids (list)
         tokenizer: tokenizer
         p: nucleus 概率阈值
-        max_len: 最大生成长度
+        max_len: 新生成 token 数量（不包含初始 BOS）
         device: 设备
         temperature: 温度参数
 
     Returns:
         翻译后的文本 (str)
     """
-    model.eval()
+    _validate_translation_request(model, src_ids, max_len)
+    if not 0 < p <= 1:
+        raise ValueError("p must be in (0, 1]")
+    if temperature <= 0:
+        raise ValueError("temperature must be positive")
 
     # 获取起始 token
     # GPT2 tokenizer 没有 BOS，使用 EOS 作为 BOS（这是常见做法）

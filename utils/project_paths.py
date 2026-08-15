@@ -6,6 +6,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ARTIFACTS_DIR = PROJECT_ROOT / "artifacts"
 MLX_MODEL_DIR = ARTIFACTS_DIR / "models" / "Qwen3-0.6B"
+MLX_MODEL_MANIFEST = MLX_MODEL_DIR / "mini_llm_download_manifest.json"
 TOOL_ROUTER_DATA_DIR = PROJECT_ROOT / "data" / "tool_router"
 TOOL_ROUTER_SHORT_ADAPTER_DIR = (
     ARTIFACTS_DIR / "adapters" / "tool-router-short"

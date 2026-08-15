@@ -97,6 +97,7 @@ def train_decoder_only(
 ):
     from torch.utils.tensorboard import SummaryWriter
     from utils.checkpoint_utils import (
+        capture_rng_state,
         get_checkpoint_config,
         get_checkpoint_training_config,
         load_checkpoint_for_training,
@@ -171,11 +172,8 @@ def train_decoder_only(
     num_training_steps = None
     if use_scheduler:
         scheduler_type = resume_training_config.get('scheduler_type', scheduler_type)
-        num_training_steps = resume_training_config.get(
-            'num_training_steps',
-            len(train_loader) * epochs,
-        )
-        num_warmup_steps = resume_training_config.get('num_warmup_steps')
+        num_training_steps = len(train_loader) * epochs
+        num_warmup_steps = 0 if resume_from is not None else None
         scheduler = WarmupLRScheduler(
             optimizer,
             scheduler_type=scheduler_type,
@@ -186,6 +184,8 @@ def train_decoder_only(
         print(f"使用 {scheduler_type} 学习率调度器")
         print(f"Warmup 步数: {scheduler.num_warmup_steps}")
         print(f"总训练步数: {num_training_steps}")
+        if resume_from is not None:
+            print("恢复训练将从配置的 lr 开始新的衰减周期")
 
     # 保存最佳模型
     best_val_loss = float('inf')
@@ -197,11 +197,14 @@ def train_decoder_only(
             resume_from,
             model,
             optimizer,
-            scheduler=scheduler,
+            scheduler=None,
             device=device,
         )
         start_epoch = training_info['start_epoch']
         best_val_loss = training_info['best_val_loss']
+        if scheduler is not None:
+            for parameter_group in optimizer.param_groups:
+                parameter_group['lr'] = lr
 
     # TensorBoard 日志
     log_dir = os.path.join(
@@ -215,6 +218,7 @@ def train_decoder_only(
         for epoch in range(start_epoch, start_epoch + epochs):
             model.train()
             total_loss = 0
+            total_tokens = 0
             for x, y in tqdm(train_loader, desc=f"Epoch {epoch} - Train"):
                 x, y = x.to(device), y.to(device)
                 # 创建 mask：需要同时考虑因果关系和 padding
@@ -236,8 +240,10 @@ def train_decoder_only(
                 if scheduler is not None:
                     scheduler.step()
 
-                total_loss += loss.item()
-            avg_loss = total_loss / len(train_loader)
+                num_tokens = (y != pad_token_id).sum().item()
+                total_loss += loss.item() * num_tokens
+                total_tokens += num_tokens
+            avg_loss = total_loss / total_tokens
             current_lr = optimizer.param_groups[0]['lr']
             print(f"Epoch {epoch} Train Loss: {avg_loss:.4f}, LR: {current_lr:.2e}")
 
@@ -247,6 +253,7 @@ def train_decoder_only(
             # 验证
             model.eval()
             val_loss = 0
+            val_tokens = 0
             with torch.no_grad():
                 for x, y in tqdm(val_loader, desc=f"Epoch {epoch} - Val"):
                     x, y = x.to(device), y.to(device)
@@ -256,8 +263,10 @@ def train_decoder_only(
                     mask = combine_masks(causal_mask, padding_mask)
                     logits, _ = model(x, mask=mask)
                     loss = criterion(logits.reshape(-1, vocab_size), y.reshape(-1))
-                    val_loss += loss.item()
-            avg_val_loss = val_loss / len(val_loader)
+                    num_tokens = (y != pad_token_id).sum().item()
+                    val_loss += loss.item() * num_tokens
+                    val_tokens += num_tokens
+            avg_val_loss = val_loss / val_tokens
             print(f"Epoch {epoch} Val Loss: {avg_val_loss:.4f}")
 
             # 记录验证指标到 TensorBoard
@@ -275,6 +284,7 @@ def train_decoder_only(
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'val_loss': avg_val_loss,
+                    'rng_state': capture_rng_state(),
                     'config': {
                         'vocab_size': vocab_size,
                         'd_model': d_model,
@@ -312,6 +322,7 @@ def train_decoder_only(
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'val_loss': best_val_loss,
+            'rng_state': capture_rng_state(),
             'config': {
                 'vocab_size': vocab_size,
                 'd_model': d_model,
@@ -346,6 +357,7 @@ def train_decoder_only(
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'val_loss': best_val_loss,
+            'rng_state': capture_rng_state(),
             'config': {
                 'vocab_size': vocab_size,
                 'd_model': d_model,

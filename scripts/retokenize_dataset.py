@@ -4,57 +4,56 @@
 
 import torch
 import os
+from itertools import zip_longest
 from utils.sentencepiece_tokenizer import SentencePieceTokenizer
-from tqdm import tqdm
 
 
-def retokenize_file(input_file, output_file, tokenizer, add_special_tokens=True, max_len=None):
-    """
-    使用新 tokenizer 重新处理文本文件
+def retokenize_parallel_files(
+    src_input_file,
+    tgt_input_file,
+    src_output_file,
+    tgt_output_file,
+    tokenizer,
+    max_len=None,
+):
+    """Tokenize aligned source/target lines without allowing silent shifts."""
+    if max_len is not None and max_len < 2:
+        raise ValueError("max_len must be at least 2 when special tokens are used")
+    src_ids_list = []
+    tgt_ids_list = []
 
-    Args:
-        input_file: 输入文本文件
-        output_file: 输出 .pt 文件
-        tokenizer: tokenizer 实例
-        add_special_tokens: 是否添加特殊 token
-        max_len: 最大长度（可选截断）
-    """
-    print(f"处理: {input_file}")
-    print(f"  → {output_file}")
+    with open(src_input_file, encoding="utf-8") as src_file, open(
+        tgt_input_file, encoding="utf-8"
+    ) as tgt_file:
+        pairs = zip_longest(src_file, tgt_file)
+        for line_number, pair in enumerate(pairs, start=1):
+            src_line, tgt_line = pair
+            if src_line is None or tgt_line is None:
+                raise ValueError(
+                    f"平行语料行数不一致，首次出现在第 {line_number} 行"
+                )
+            src_text = src_line.strip()
+            tgt_text = tgt_line.strip()
+            if bool(src_text) != bool(tgt_text):
+                raise ValueError(
+                    f"平行语料第 {line_number} 行只有一侧为空，拒绝破坏对齐"
+                )
+            if not src_text:
+                continue
 
-    ids_list = []
-    total_tokens = 0
-    max_seq_len = 0
+            src_ids = tokenizer.encode(src_text, add_special_tokens=False)
+            tgt_ids = tokenizer.encode(tgt_text, add_special_tokens=True)
+            if max_len is not None and len(src_ids) > max_len:
+                src_ids = src_ids[:max_len]
+            if max_len is not None and len(tgt_ids) > max_len:
+                tgt_ids = tgt_ids[:max_len]
+                tgt_ids[-1] = tokenizer.eos_token_id
+            src_ids_list.append(src_ids)
+            tgt_ids_list.append(tgt_ids)
 
-    with open(input_file, 'r', encoding='utf-8') as f:
-        lines = f.readlines()
-
-    for line in tqdm(lines, desc=f"  Tokenizing", ncols=80):
-        line = line.strip()
-        if not line:
-            continue
-
-        # 编码
-        ids = tokenizer.encode(line, add_special_tokens=add_special_tokens)
-
-        # 可选截断
-        if max_len and len(ids) > max_len:
-            ids = ids[:max_len]
-
-        ids_list.append(ids)
-        total_tokens += len(ids)
-        max_seq_len = max(max_seq_len, len(ids))
-
-    # 保存
-    torch.save(ids_list, output_file)
-
-    avg_len = total_tokens / len(ids_list) if ids_list else 0
-    print(f"  ✓ 完成: {len(ids_list):,} 条")
-    print(f"    平均长度: {avg_len:.1f} tokens")
-    print(f"    最大长度: {max_seq_len} tokens")
-    print()
-
-    return len(ids_list), avg_len, max_seq_len
+    torch.save(src_ids_list, src_output_file)
+    torch.save(tgt_ids_list, tgt_output_file)
+    return src_ids_list, tgt_ids_list
 
 
 def main():
@@ -89,8 +88,6 @@ def main():
 
     # 处理所有split
     splits = ["train", "validation", "test"]
-    languages = ["en", "zh"]
-
     print("=" * 70)
     print("重新 Tokenize 数据集")
     print("=" * 70)
@@ -99,30 +96,28 @@ def main():
     stats = {}
 
     for split in splits:
-        for lang in languages:
-            input_file = os.path.join(data_dir, f"{split}.{lang}.txt")
-            output_file = os.path.join(data_dir, f"{split}.{lang}_ids_sp.pt")
+        src_input = os.path.join(data_dir, f"{split}.en.txt")
+        tgt_input = os.path.join(data_dir, f"{split}.zh.txt")
+        src_output = os.path.join(data_dir, f"{split}.en_ids_sp.pt")
+        tgt_output = os.path.join(data_dir, f"{split}.zh_ids_sp.pt")
+        if not os.path.exists(src_input) or not os.path.exists(tgt_input):
+            print(f"⚠ 跳过不完整的语料对: {src_input}, {tgt_input}")
+            continue
 
-            if not os.path.exists(input_file):
-                print(f"⚠ 跳过不存在的文件: {input_file}")
-                continue
-
-            # 对于目标语言（中文），添加 BOS/EOS
-            # 对于源语言（英文），不添加特殊 token（在训练时动态处理）
-            add_special_tokens = (lang == "zh")
-
-            count, avg_len, max_len = retokenize_file(
-                input_file=input_file,
-                output_file=output_file,
-                tokenizer=tokenizer,
-                add_special_tokens=add_special_tokens,
-                max_len=None  # 不截断，在训练时动态处理
-            )
-
+        print(f"处理平行语料: {src_input} <-> {tgt_input}")
+        src_rows, tgt_rows = retokenize_parallel_files(
+            src_input,
+            tgt_input,
+            src_output,
+            tgt_output,
+            tokenizer,
+        )
+        for lang, rows in (("en", src_rows), ("zh", tgt_rows)):
+            lengths = [len(row) for row in rows]
             stats[f"{split}.{lang}"] = {
-                "count": count,
-                "avg_len": avg_len,
-                "max_len": max_len
+                "count": len(rows),
+                "avg_len": sum(lengths) / len(lengths) if lengths else 0,
+                "max_len": max(lengths, default=0),
             }
 
     # 输出统计
@@ -134,7 +129,7 @@ def main():
     print("-" * 70)
 
     for split in splits:
-        for lang in languages:
+        for lang in ("en", "zh"):
             key = f"{split}.{lang}"
             if key in stats:
                 s = stats[key]

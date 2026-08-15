@@ -1,5 +1,6 @@
 import os
 import argparse
+from itertools import zip_longest
 from tqdm import tqdm
 import torch
 
@@ -46,30 +47,31 @@ def preprocess_parallel_corpus(src_file, tgt_file, tokenizer, src_out, tgt_out, 
         tgt_out: 目标语言输出文件
         max_len: 最大序列长度（会过滤掉超过此长度的句对）
     """
-    # 读取源和目标文本
-    with open(src_file, 'r', encoding='utf-8') as f:
-        src_lines = [line.strip() for line in f if line.strip()]
-    with open(tgt_file, 'r', encoding='utf-8') as f:
-        tgt_lines = [line.strip() for line in f if line.strip()]
-
-    if len(src_lines) != len(tgt_lines):
-        print(f"警告：源文件和目标文件的行数不匹配！src: {len(src_lines)}, tgt: {len(tgt_lines)}")
-        min_len = min(len(src_lines), len(tgt_lines))
-        src_lines = src_lines[:min_len]
-        tgt_lines = tgt_lines[:min_len]
-
     src_ids_list = []
     tgt_ids_list = []
 
-    # 逐对处理
-    for src_line, tgt_line in tqdm(zip(src_lines, tgt_lines), total=len(src_lines), desc="Tokenizing"):
-        src_ids = tokenizer.encode(src_line, add_special_tokens=False)
-        tgt_ids = tokenizer.encode(tgt_line, add_special_tokens=False)
+    with open(src_file, encoding="utf-8") as source, open(
+        tgt_file, encoding="utf-8"
+    ) as target:
+        for line_number, pair in enumerate(
+            tqdm(zip_longest(source, target), desc="Tokenizing"),
+            start=1,
+        ):
+            src_line, tgt_line = pair
+            if src_line is None or tgt_line is None:
+                raise ValueError(f"平行语料行数不一致，第 {line_number} 行缺失")
+            src_line = src_line.strip()
+            tgt_line = tgt_line.strip()
+            if bool(src_line) != bool(tgt_line):
+                raise ValueError(f"平行语料第 {line_number} 行只有一侧为空")
+            if not src_line:
+                continue
 
-        # 过滤掉过长的句对
-        if len(src_ids) <= max_len and len(tgt_ids) <= max_len:
-            src_ids_list.append(src_ids)
-            tgt_ids_list.append(tgt_ids)
+            src_ids = tokenizer.encode(src_line, add_special_tokens=False)
+            tgt_ids = tokenizer.encode(tgt_line, add_special_tokens=False)
+            if len(src_ids) <= max_len and len(tgt_ids) <= max_len:
+                src_ids_list.append(src_ids)
+                tgt_ids_list.append(tgt_ids)
 
     # 保存
     torch.save(src_ids_list, src_out)

@@ -1,4 +1,5 @@
 import torch
+import pytest
 
 from scripts.preprocess import preprocess_text_file
 from utils.tokenizer_utils import load_gpt2_tokenizer
@@ -31,6 +32,7 @@ def test_preprocess_keeps_eos_boundaries_and_final_chunk(tmp_path):
 
 
 def test_gpt2_uses_a_dedicated_padding_token():
+    pytest.importorskip("transformers")
     tokenizer = load_gpt2_tokenizer("tokenization/gpt2")
     assert tokenizer.pad_token_id is not None
     assert tokenizer.pad_token_id != 0

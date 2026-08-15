@@ -1,9 +1,11 @@
-from transformers import GPT2TokenizerFast
+"""Legacy GPT-2 translation helper; the main path uses SentencePiece."""
+
 import torch
-import os
+
+from utils.tokenizer_utils import load_gpt2_tokenizer
 
 def add_bos_eos_to_file(in_file, out_file, tokenizer_dir, add_bos=True, add_eos=True):
-    tokenizer = GPT2TokenizerFast.from_pretrained(tokenizer_dir)
+    tokenizer = load_gpt2_tokenizer(tokenizer_dir)
     bos_id = tokenizer.bos_token_id if tokenizer.bos_token_id is not None else tokenizer.eos_token_id
     eos_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else tokenizer.bos_token_id
     with open(in_file, 'r', encoding='utf-8') as f:
